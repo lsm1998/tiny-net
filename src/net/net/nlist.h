@@ -1,71 +1,158 @@
 #ifndef TINY_NET_NLIST_H
 #define TINY_NET_NLIST_H
 
-#include <stdbool.h>
-#include <stddef.h>
 
-typedef void (*nlist_for_each_cb_t)(void* data);
-
+/**
+ * @brief 链表结点类型
+ * 采用的是双向链表，方便结点的删除。为节省内存资源，可考虑简化为单向链表
+ */
 typedef struct nlist_node_t
 {
-    void* data;
-    struct nlist_node_t* prev;
-    struct nlist_node_t* next;
+    struct nlist_node_t* next; // 前驱结点
+    struct nlist_node_t* pre; // 后继结点
 } nlist_node_t;
 
-static inline void nlist_node_init(nlist_node_t* node, void* data, nlist_node_t* prev, nlist_node_t* next)
+/**
+ * @brief 头结点的初始化
+ */
+static inline void nlist_node_init(nlist_node_t* node)
 {
-    node->data = data;
-    node->prev = prev;
-    node->next = next;
+    node->pre = node->next = (nlist_node_t*)0;
 }
 
+/**
+ * @brief 获取结点的后继结点
+ */
+static inline nlist_node_t* nlist_node_next(const nlist_node_t* node)
+{
+    return node->next;
+}
+
+/**
+ * @brief 获取结点的前一结点
+ */
+static inline nlist_node_t* nlist_node_pre(const nlist_node_t* node)
+{
+    return node->pre;
+}
+
+/**
+ * @brief 设置结点的后一结点
+ */
+static inline void nlist_node_set_next(nlist_node_t* pre, nlist_node_t* next)
+{
+    pre->next = next;
+}
+
+/**
+ * @brief 通用链表结构
+ */
 typedef struct nlist_t
 {
-    nlist_node_t* head;
-    nlist_node_t* tail;
-    int size;
+    nlist_node_t* first; // 头结点
+    nlist_node_t* last; // 尾结点
+    int count; // 结点数量
 } nlist_t;
 
-static inline void nlist_init(nlist_t* list)
+void nlist_init(nlist_t* list);
+
+/**
+ * 判断链表是否为空
+ * @param list 判断的链表
+ * @return 1 - 空，0 - 非空
+ */
+static inline int nlist_is_empty(const nlist_t* list)
 {
-    list->head = NULL;
-    list->tail = NULL;
-    list->size = 0;
+    return list->count == 0;
 }
 
-static inline bool nlist_is_empty(const nlist_t* list)
+/**
+ * 获取链表的结点数量
+ * @param list 查询的链表
+ * @return 结果的数据
+ */
+static inline int nlist_count(const nlist_t* list)
 {
-    return list->size == 0;
+    return list->count;
 }
 
-static inline int nlist_size(const nlist_t* list)
+/**
+ * 获取指定链表的第一个表项
+ * @param list 查询的链表
+ * @return 第一个表项
+ */
+static inline nlist_node_t* nlist_first(const nlist_t* list)
 {
-    return list->size;
+    return list->first;
 }
 
-nlist_node_t* nlist_insert_node(nlist_t* list, nlist_node_t* prev, nlist_node_t* next, void* data);
+/**
+ * 获取指定链接的最后一个表项
+ * @param list 查询的链表
+ * @return 最后一个表项
+ */
+static inline nlist_node_t* nlist_last(const nlist_t* list)
+{
+    return list->last;
+}
 
-nlist_node_t* nlist_insert_index(nlist_t* list, int index, void* data);
+/**
+ * @brief 将结构体中某个字段的地址转换为所在结构体的指针
+ * 例如：
+ * struct aa{
+ *  .....
+ *  int node;
+ *  .....
+ * };
+ * struct aa a;
+ * 1.求结点在所在结构中的偏移:定义一个指向0的指针，用(struct aa *)&0->node，所得即为node字段在整个结构体的偏移
+ */
+#define noffset_in_parent(parent_type, node_name)    \
+    ((char *)&(((parent_type*)0)->node_name))
 
-nlist_node_t* nlist_inset_head(nlist_t* list, void* data);
+// 2.求node所在的结构体首址：node的地址 - node的偏移
+// 即已知a->node的地址，求a的地址
+#define noffset_to_parent(node, parent_type, node_name)   \
+    ((char *)node - noffset_in_parent(parent_type, node_name))
 
-nlist_node_t* nlist_inset_tail(nlist_t* list, void* data);
+// 3. 进行转换: (struct aa *)addr
+// 使用方式：net_node_to_parent(node_addr, struct aa, node)
+#define nlist_entry(node, parent_type, node_name)   \
+        ((parent_type *)(node ? noffset_to_parent((node), parent_type, node_name) : 0))
 
-void nlist_for_each(const nlist_t* list, nlist_for_each_cb_t cb);
+#define nlist_for_each(node, list)      for (node = (list)->first; node; node = node->next)
 
-bool nlist_remove_head(nlist_t* list);
+void nlist_insert_first(nlist_t* list, nlist_node_t* node);
+nlist_node_t* nlist_remove(nlist_t* list, nlist_node_t* node);
 
-bool nlist_remove_tail(nlist_t* list);
+/**
+ * @brief 移除链表首个结点
+ */
+static inline nlist_node_t* nlist_remove_first(nlist_t* list)
+{
+    nlist_node_t* first = nlist_first(list);
+    if (first)
+    {
+        nlist_remove(list, first);
+    }
+    return first;
+}
 
-bool nlist_remove_node(nlist_t* list, nlist_node_t* node, bool free_node);
+void nlist_insert_last(nlist_t* list, nlist_node_t* node);
 
-bool nlist_remove_index(nlist_t* list, int index);
+/**
+ * @brief 移除链表末尾结点
+ */
+static inline nlist_node_t* nlist_remove_last(nlist_t* list)
+{
+    nlist_node_t* last = nlist_last(list);
+    if (last)
+    {
+        nlist_remove(list, last);
+    }
+    return last;
+}
 
-void nlist_clear(nlist_t* list);
-
-nlist_node_t* nlist_remove_and_get_head(nlist_t* list);
-
-nlist_node_t* nlist_remove_and_get_tail(nlist_t* list);
+void nlist_insert_after(nlist_t* list, nlist_node_t* pre, nlist_node_t* node);
 
 #endif //TINY_NET_NLIST_H
