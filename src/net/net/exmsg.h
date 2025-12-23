@@ -14,6 +14,8 @@ typedef struct exmsg_t
     exmsg_type_t type;
     // void* data;
     int id;
+    long timestamp;
+    long reserved;
 } exmsg_t;
 
 net_err_t exmsg_init();
