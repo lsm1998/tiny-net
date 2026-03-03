@@ -13,6 +13,20 @@ static mblock_t tcp_mblock;
 
 static nlist_t tcp_list;
 
+bool tcp_has_pending_conn(const tcp_t* tcp)
+{
+    nlist_node_t* node;
+    nlist_for_each(node, &tcp_list)
+    {
+        tcp_t* temp = nlist_entry(node, tcp_t, base.node);
+        if (temp->state == TCP_STATE_ESTABLISHED && temp->parent == tcp && temp->flags.inactive)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 net_err_t tcp_init(void)
 {
     plat_memset(tcp_tbl, 0, sizeof(tcp_tbl));

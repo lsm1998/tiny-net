@@ -186,6 +186,8 @@ bool tcp_backlog_full(const tcp_t* tcp);
 
 tcp_t* tcp_create_child(tcp_t* parent, const tcp_seg_t* seg);
 
+bool tcp_has_pending_conn(const tcp_t* tcp);
+
 #define TCP_SEQ_LE(a, b)        ((int32_t)(a) - (int32_t)(b) <= 0)
 #define TCP_SEQ_LT(a, b)        ((int32_t)(a) - (int32_t)(b) < 0)
 
