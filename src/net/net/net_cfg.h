@@ -128,4 +128,7 @@
 // TCP TIME-WAIT状态持续时间，单位秒（2MSL）
 #define TCP_TIMEOUT_MSL 30
 
+// IP地址字符串长度
+#define INET_ADDRSTRLEN 16
+
 #endif //TINY_NET_NET_CFG_H

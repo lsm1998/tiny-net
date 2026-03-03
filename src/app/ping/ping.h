@@ -34,6 +34,6 @@ typedef struct ping_t
 } ping_t;
 
 // 发送ping请求
-void ping_run(ping_t* ping, const char* dest_ip, int count, int size, int interval,int timeout);
+void ping_run(ping_t* ping, const char* dest, int count, int size, int interval,int timeout);
 
 #endif //TINY_NET_PING_H

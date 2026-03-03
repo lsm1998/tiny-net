@@ -1,5 +1,5 @@
 #include "net_api.h"
-#include <ctype.h>
+#include "strings.h"
 
 char* x_inet_ntoa(struct in_addr in)
 {
@@ -47,12 +47,82 @@ uint32_t x_inet_addr(const char* cp)
     return x_htonl(addr);
 }
 
-int x_inet_pton(int family, const char* src, void* dst)
+int x_inet_pton(const int family, const char* src, void* dst)
 {
+    if (family == AF_INET)
+    {
+        uint32_t addr = x_inet_addr(src);
+        if (addr == INADDR_NONE)
+        {
+            errno = EINVAL;
+            return -1;
+        }
+        *(uint32_t*)dst = addr;
+        return 1;
+    }
     return 0;
 }
 
-const char* x_inet_ntop(int family, const void* src, char* dst, size_t size)
+const char* x_inet_ntop(const int family, const void* src, char* dst, const size_t size)
 {
-    return 0;
+    if (!src || !dst || size == 0)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    dst[0] = '\0';
+
+    if (family == AF_INET)
+    {
+        if (size < INET_ADDRSTRLEN)
+        {
+            errno = ENOSPC;
+            return NULL;
+        }
+
+        const uint8_t* b = (const uint8_t*)src;
+        size_t pos = 0;
+
+        if (!x_append_dec_u8(dst, size, &pos, b[0]))
+        {
+            errno = ENOSPC;
+            return NULL;
+        }
+        if (!x_append_char(dst, size, &pos, '.'))
+        {
+            errno = ENOSPC;
+            return NULL;
+        }
+        if (!x_append_dec_u8(dst, size, &pos, b[1]))
+        {
+            errno = ENOSPC;
+            return NULL;
+        }
+        if (!x_append_char(dst, size, &pos, '.'))
+        {
+            errno = ENOSPC;
+            return NULL;
+        }
+        if (!x_append_dec_u8(dst, size, &pos, b[2]))
+        {
+            errno = ENOSPC;
+            return NULL;
+        }
+        if (!x_append_char(dst, size, &pos, '.'))
+        {
+            errno = ENOSPC;
+            return NULL;
+        }
+        if (!x_append_dec_u8(dst, size, &pos, b[3]))
+        {
+            errno = ENOSPC;
+            return NULL;
+        }
+
+        return dst;
+    }
+
+    // 目前仅支持IPv4
+    return NULL;
 }

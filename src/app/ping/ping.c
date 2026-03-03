@@ -6,8 +6,53 @@
 
 #define ECHO_ID 0x1234
 
-void ping_run(ping_t* ping, const char* dest_ip, const int count, const int size, const int interval, const int timeout)
+int get_host(const char* dest, char* ip_str, const size_t ip_str_size)
 {
+    struct addrinfo hints, *res;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET; // IPv4
+    hints.ai_socktype = 0; // 不限制套接字类型
+
+    int status = getaddrinfo(dest, NULL, &hints, &res);
+    if (status != 0)
+        return -1;
+
+    for (struct addrinfo* p = res; p != NULL; p = p->ai_next)
+    {
+        if (p->ai_family == AF_INET)
+        {
+            struct sockaddr_in* ipv4 = (struct sockaddr_in*)p->ai_addr;
+            if (inet_ntop(AF_INET, &ipv4->sin_addr,
+                          ip_str, ip_str_size) == NULL)
+            {
+                perror("inet_ntop");
+                freeaddrinfo(res);
+                return -1;
+            }
+
+            freeaddrinfo(res);
+            return 0;
+        }
+    }
+
+    freeaddrinfo(res);
+    return -1;
+}
+
+void ping_run(ping_t* ping, const char* dest, const int count, const int size, const int interval, const int timeout)
+{
+    char dest_ip[16];
+    if (inet_pton(AF_INET, dest, dest_ip) > 0) // 直接是IP地址
+    {
+        strncpy(dest_ip, dest, sizeof(dest_ip));
+    }
+    else if (get_host(dest, dest_ip, sizeof(dest_ip)) < 0) // 解析域名失败
+    {
+        plat_printf("Invalid destination: %s\n", dest);
+        return;
+    }
+
     static uint16_t seq_id = ECHO_ID;
     int fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if (fd < 0)
