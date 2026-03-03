@@ -307,16 +307,24 @@ static udp_t* udp_find(const ipaddr_t* src_ip, const uint16_t src_port, const ip
 
 net_err_t udp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_ip)
 {
+    net_err_t err = pktbuf_set_cont(buf, sizeof(ipv4_header_t));
+    if (err != NET_ERR_OK)
+    {
+        dbug_error(DBG_MOD_UDP, "udp_input: pktbuf_set_cont ipv4 hdr failed, err=%d", err);
+        return err;
+    }
+
     uint8_t* data = pktbuf_data(buf);
     int ip_hdr_size = ipv4_hdr_size((ipv4_pkt_t*)data);
 
-    net_err_t err = pktbuf_set_cont(buf, ip_hdr_size + (int)sizeof(udp_header_t));
+    err = pktbuf_set_cont(buf, ip_hdr_size + (int)sizeof(udp_header_t));
     if (err != NET_ERR_OK)
     {
         dbug_error(DBG_MOD_UDP, "udp_input: pktbuf_set_cont failed, err=%d", err);
         return err;
     }
 
+    data = pktbuf_data(buf);
     udp_pkt_t* udp_pkt = (udp_pkt_t*)(data + ip_hdr_size);
     uint16_t remote_port = x_ntohs(udp_pkt->header.src_port);
     uint16_t local_port = x_ntohs(udp_pkt->header.dest_port);
@@ -351,8 +359,19 @@ net_err_t udp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_
         return err;
     }
 
-    size_t len = sizeof(udp_header_t) - sizeof(udp_from_t);
-    pktbuf_remove_header(buf, (int)len);
+    err = pktbuf_remove_header(buf, sizeof(udp_header_t));
+    if (err != NET_ERR_OK)
+    {
+        dbug_warn(DBG_MOD_UDP, "udp_input: remove udp header failed");
+        return err;
+    }
+
+    err = pktbuf_add_header(buf, sizeof(udp_from_t), true);
+    if (err != NET_ERR_OK)
+    {
+        dbug_warn(DBG_MOD_UDP, "udp_input: add udp meta header failed");
+        return err;
+    }
 
     udp_from_t* from = (udp_from_t*)pktbuf_data(buf);
     ipaddr_copy(&from->src_ip, src_ip);

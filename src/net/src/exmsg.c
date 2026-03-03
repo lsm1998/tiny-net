@@ -177,9 +177,12 @@ net_err_t exmsg_func_exec(const exmsg_func_t func, void* arg)
     {
         dbug_error(DBG_MOD_EXMSG, "fixq full");
         mblock_free(&msg_mblock, msg);
+        sys_sem_free(func_msg.wait_sem);
         return NET_ERR_MEM;
     }
 
     sys_sem_wait(func_msg.wait_sem, 0);
-    return func_msg.err;
+    net_err_t err = func_msg.err;
+    sys_sem_free(func_msg.wait_sem);
+    return err;
 }

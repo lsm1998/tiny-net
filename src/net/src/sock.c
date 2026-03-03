@@ -183,9 +183,12 @@ net_err_t socket_close_req_in(const func_msg_t* msg)
 
     if (err == NET_ERR_NEED_WAIT && s->sock->conn_wait)
     {
-        sock_wait_add(s->sock->conn_wait, NET_CLOSE_WAIT_TIMEOUT, req);
+        sock_wait_add(s->sock->conn_wait, NET_CLOSE_WAIT_TIMEOUT * 1000, req);
     }
-    socket_free(s);
+    else
+    {
+        socket_free(s);
+    }
     return err;
 }
 
@@ -346,6 +349,7 @@ net_err_t socket_destroy_req_in(const func_msg_t* msg)
     {
         s->sock->ops->destroy(s->sock);
     }
+    socket_free(s);
     return NET_ERR_OK;
 }
 

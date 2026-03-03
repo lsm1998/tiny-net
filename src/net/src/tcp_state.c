@@ -213,7 +213,7 @@ void tcp_time_wait(tcp_t* tcp)
     tcp_set_state(tcp, TCP_STATE_TIME_WAIT);
 
     tcp_kill_all_timer(tcp);
-    net_timer_add(&tcp->conn.keep_timer, "2msl timer", tcp_time_wait_timeout, tcp, 2 * TCP_TIMEOUT_MSL, 0);
+    net_timer_add(&tcp->conn.keep_timer, "2msl timer", tcp_time_wait_timeout, tcp, 2 * TCP_TIMEOUT_MSL * 1000, 0);
     sock_wakeup(&tcp->base, SOCK_WAIT_ALL, NET_ERR_CLOSE);
 }
 

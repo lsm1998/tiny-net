@@ -553,7 +553,7 @@ void arp_clear(const netif_t* netif)
 void arp_update_from_ip_buf(netif_t* netif,  pktbuf_t* buf)
 {
     // 确保包是连续的
-    net_err_t err = pktbuf_set_cont(buf, sizeof(ipv4_header_t));
+    net_err_t err = pktbuf_set_cont(buf, sizeof(ether_header_t) + sizeof(ipv4_header_t));
     if (err != NET_ERR_OK)
     {
         dbug_error(DBG_MOD_ARP, "arp_update_from_ip_buf: pktbuf_set_cont failed, err=%d", err);
