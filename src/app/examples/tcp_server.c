@@ -1,8 +1,10 @@
 #include "net_api.h"
 #include "common.h"
+#include "dbug_module.h"
 
 int main()
 {
+    dbug_module_enable_only(DBG_MOD_TCP);
     tiny_net_init();
 
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -42,21 +44,30 @@ int main()
             break;
         }
 
-        char buffer[1024];
-        plat_memset(buffer, 0, sizeof(buffer));
-        ssize_t recv_len = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-        if (recv_len < 0)
+        while (true)
         {
-            printf("recv failed\n");
-            close(client_fd);
-            continue;
-        }
-        // 回显数据
-        buffer[recv_len] = '\0';
-        printf("Received from client: %s\n", buffer);
-        if (send(client_fd, buffer, recv_len, 0) < 0)
-        {
-            printf("send failed\n");
+            char buffer[1024];
+            plat_memset(buffer, 0, sizeof(buffer));
+            ssize_t recv_len = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+            if (recv_len < 0)
+            {
+                printf("recv failed\n");
+                close(client_fd);
+                break;
+            }
+            if (recv_len == 0)
+            {
+                printf("client closed connection\n");
+                close(client_fd);
+                break;
+            }
+            // 回显数据
+            buffer[recv_len] = '\0';
+            printf("Received from client: %s\n", buffer);
+            if (send(client_fd, buffer, recv_len, 0) < 0)
+            {
+                printf("send failed\n");
+            }
         }
     }
     return 0;

@@ -51,16 +51,20 @@ typedef struct x_epoll
 
 int x_epoll_create1(int flags);
 
-int x_epoll_ctl(int epfd, int op, int fd, x_epoll_event_t* event);
+int x_epoll_create();
 
-int x_epoll_wait(int epfd, x_epoll_event_t* events, int maxevents, int timeout);
+int x_epoll_ctl(int epoll_fd, int op, int fd, x_epoll_event_t* event);
+
+int x_epoll_wait(int epoll_fd, x_epoll_event_t* events, int max_events, int timeout);
 
 #define epoll_event x_epoll_event
 
 #define epoll_create1(flags) x_epoll_create1(flags)
 
-#define epoll_ctl(epfd, op, fd, event) x_epoll_ctl(epfd, op, fd, event)
+#define epoll_create() x_epoll_create()
 
-#define epoll_wait(epfd, events, maxevents, timeout) x_epoll_wait(epfd, events, maxevents, timeout)
+#define epoll_ctl(epoll_fd, op, fd, event) x_epoll_ctl(epoll_fd, op, fd, event)
+
+#define epoll_wait(epoll_fd, events, max_events, timeout) x_epoll_wait(epoll_fd, events, max_events, timeout)
 
 #endif //TINY_NET_EPOLL_H
