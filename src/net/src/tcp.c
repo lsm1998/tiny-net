@@ -297,16 +297,19 @@ void tcp_free(tcp_t* tcp)
 
 static void tcp_clear_with_parent(const tcp_t* tcp)
 {
-    nlist_node_t* node;
-    nlist_for_each(node, &tcp_list)
+    nlist_node_t* node = tcp_list.first;
+    while (node)
     {
+        nlist_node_t* next = node->next;
         tcp_t* temp = nlist_entry(node, tcp_t, base.node);
-        if (temp->parent == tcp)
+        // 仅清理监听队列中尚未被 accept 的 child，已 accept 的连接继续存活
+        if (temp->parent == tcp && temp->flags.inactive)
         {
             temp->parent = NULL;
-            // tcp_abort(temp, NET_ERR_CLOSE);
-            // tcp_free(temp);
+            tcp_abort(temp, NET_ERR_CLOSE);
+            tcp_free(temp);
         }
+        node = next;
     }
 }
 
