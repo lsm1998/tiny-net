@@ -168,8 +168,14 @@ net_err_t tcp_data_in(tcp_t* tcp, tcp_seg_t* seg)
     }
 
     int wakeup = 0;
+    if(size > 0)
+    {
+         tcp->recv.next_seq += (uint32_t)size;
+         wakeup++;
+    }
+
     tcp_header_t* header = seg->header;
-    if (header->f_fin && tcp->recv.next_seq == seg->seq)
+    if (header->f_fin && size == (int)seg->data_len)
     {
         tcp->recv.next_seq++;
         tcp->flags.fin_in = 1;
@@ -178,6 +184,7 @@ net_err_t tcp_data_in(tcp_t* tcp, tcp_seg_t* seg)
 
     if (wakeup > 0)
     {
+        tcp_send_ack(tcp, seg);
         if (tcp->flags.fin_in)
         {
             sock_wakeup(&tcp->base, SOCK_WAIT_ALL, NET_ERR_CLOSE);
@@ -186,8 +193,6 @@ net_err_t tcp_data_in(tcp_t* tcp, tcp_seg_t* seg)
         {
             sock_wakeup(&tcp->base, SOCK_WAIT_READ, NET_ERR_OK);
         }
-
-        tcp_send_ack(tcp, seg);
     }
 
     return NET_ERR_OK;
