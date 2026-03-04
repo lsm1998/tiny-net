@@ -2,6 +2,7 @@
 #define TINY_NET_STRINGS_H
 
 #include <ctype.h>
+#include <stdint.h>
 
 static inline size_t x_strlen(const char* s)
 {
