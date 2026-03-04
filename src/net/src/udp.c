@@ -65,8 +65,8 @@ net_err_t upd_init()
     return NET_ERR_OK;
 }
 
-static net_err_t udp_sendto(sock_t* sock, const uint8_t* buf, const size_t len, int flags,
-                            const struct x_sockaddr* dest, x_socklen_t dest_len, ssize_t* sent_size)
+net_err_t udp_sendto(sock_t* sock, const uint8_t* buf, const size_t len, int flags,
+                     const struct x_sockaddr* dest, x_socklen_t dest_len, ssize_t* sent_size)
 {
     ipaddr_t dest_ip;
 
@@ -133,8 +133,8 @@ static net_err_t udp_sendto(sock_t* sock, const uint8_t* buf, const size_t len, 
     return NET_ERR_OK;
 }
 
-static net_err_t udp_recvfrom(sock_t* sock, uint8_t* buf, const size_t len, int flags,
-                              const struct x_sockaddr* src, x_socklen_t* src_len, ssize_t* recv_size)
+net_err_t udp_recvfrom(sock_t* sock, uint8_t* buf, const size_t len, int flags,
+                       const struct x_sockaddr* src, x_socklen_t* src_len, ssize_t* recv_size)
 {
     udp_t* udp = (udp_t*)sock;
     nlist_node_t* frist = nlist_remove_first(&udp->recv_list);

@@ -36,6 +36,7 @@ typedef enum dbug_module_t
 
     // 应用层
     DBG_MOD_APP,            // 应用程序
+    DBG_MOD_DNS,            // DNS 客户端
 
     // 其他
     DBG_MOD_COMMON,         // 通用模块

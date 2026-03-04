@@ -13,6 +13,7 @@
 #include "sys_plat.h"
 #include "udp.h"
 #include "tcp.h"
+#include "dns.h"
 
 // 动态获取的网络接口信息
 static netif_info_t netif_info;
@@ -122,6 +123,9 @@ net_err_t tiny_net_init(void)
 
     // UDP模块初始化
     upd_init();
+
+    // DNS模块初始化
+    dns_init();
 
     // TCP模块初始化
     tcp_init();

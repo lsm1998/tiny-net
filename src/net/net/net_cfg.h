@@ -131,4 +131,25 @@
 // IP地址字符串长度
 #define INET_ADDRSTRLEN 16
 
+// DNS域名最大长度
+#define DNS_DOMAIN_MAX_LEN 128
+
+// DNS表项更新周期，单位秒
+#define DNS_UPDATE_PERIOID 60
+
+// DNS工作缓冲区大小
+#define DNS_ENTRY_SIZE 32
+
+// DNS请求最大数量
+#define DNS_REQ_SIZE 32
+
+// DNS工作缓冲区大小
+#define DNS_WORKING_BUF_SIZE 512
+
+// DNS查询超时重试间隔，单位秒
+#define DNS_QUERY_RETRY_TMO 5
+
+// DNS默认端口号
+#define DNS_PORT_DEFAULT 53
+
 #endif //TINY_NET_NET_CFG_H

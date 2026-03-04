@@ -45,4 +45,10 @@ net_err_t upd_output(const ipaddr_t* dest_ip, uint16_t dest_port, const ipaddr_t
 
 net_err_t udp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_ip);
 
+net_err_t udp_sendto(sock_t* sock, const uint8_t* buf, size_t len, int flags,
+                     const struct x_sockaddr* dest, x_socklen_t dest_len, ssize_t* sent_size);
+
+net_err_t udp_recvfrom(sock_t* sock, uint8_t* buf, size_t len, int flags,
+                       const struct x_sockaddr* src, x_socklen_t* src_len, ssize_t* recv_size);
+
 #endif //TINY_NET_UDP_H

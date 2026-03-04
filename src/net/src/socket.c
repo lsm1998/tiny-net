@@ -2,6 +2,7 @@
 #include "dbug.h"
 #include "exmsg.h"
 #include "sock.h"
+#include "dns.h"
 
 int x_socket(const int family, const int type, const int protocol)
 {
@@ -361,9 +362,81 @@ int x_setsockopt(const int fd, const int level, int opt_name, const void* opt_va
 
 int x_getaddrinfo(const char* node, const char* service, const struct x_addrinfo* hints, struct x_addrinfo** res)
 {
-    return -1;
+    dns_req_t* req = dns_alloc_req();
+    plat_strncpy(req->domain, node, DNS_DOMAIN_MAX_LEN);
+    ipaddr_set_any(&req->ipaddr);
+    req->err = NET_ERR_OK;
+
+    net_err_t err = exmsg_func_exec(dns_query_req_in, req);
+    if (err < NET_ERR_OK)
+    {
+        goto dns_req_err;
+    }
+    if (req->wait_sem != SYS_SEM_INVALID && sys_sem_wait(req->wait_sem, 0) < 0)
+    {
+        dbug_error(DBG_MOD_DNS, "x_getaddrinfo: wait failed, err=%d", err);
+        err = NET_ERR_TIMEOUT;
+        goto dns_req_err;
+    }
+
+    if (req->err < NET_ERR_OK)
+    {
+        dbug_error(DBG_MOD_DNS, "x_getaddrinfo: dns query failed, err=%d", req->err);
+        err = req->err;
+        goto dns_req_err;
+    }
+
+    // 构造结果
+    struct x_addrinfo* ai = malloc(sizeof(struct x_addrinfo));
+    if (ai == NULL)
+    {
+        err = NET_ERR_MEM;
+        goto dns_req_err;
+    }
+
+    ai->ai_family = AF_INET;
+    ai->ai_socktype = hints ? hints->ai_socktype : 0;
+    ai->ai_protocol = hints ? hints->ai_protocol : 0;
+    ai->ai_addrlen = sizeof(struct x_sockaddr_in);
+    ai->ai_addr = malloc(sizeof(struct x_sockaddr_in));
+    if (ai->ai_addr == NULL)
+    {
+        free(ai);
+        err = NET_ERR_MEM;
+        goto dns_req_err;
+    }
+    struct x_sockaddr_in* addr_in = (struct x_sockaddr_in*)ai->ai_addr;
+    addr_in->sin_len = sizeof(struct x_sockaddr_in);
+    addr_in->sin_family = AF_INET;
+    addr_in->sin_port = 0;
+    addr_in->sin_addr.addr0 = req->ipaddr.a_addr[0];
+    addr_in->sin_addr.addr1 = req->ipaddr.a_addr[1];
+    addr_in->sin_addr.addr2 = req->ipaddr.a_addr[2];
+    addr_in->sin_addr.addr3 = req->ipaddr.a_addr[3];
+    ai->ai_addr = (struct x_sockaddr*)addr_in;
+    ai->ai_canonname = NULL;
+    ai->ai_next = NULL;
+    *res = ai;
+
+dns_req_err:
+    dns_free_req(req);
+    return err;
 }
 
 void x_freeaddrinfo(struct x_addrinfo* res)
 {
+    while (res)
+    {
+        struct x_addrinfo* next = res->ai_next;
+        if (res->ai_canonname)
+        {
+            free(res->ai_canonname);
+        }
+        if (res->ai_addr)
+        {
+            free(res->ai_addr);
+        }
+        free(res);
+        res = next;
+    }
 }
