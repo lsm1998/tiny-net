@@ -38,9 +38,15 @@ static net_err_t alloc_port(sock_t* sock)
     return NET_ERR_FULL; // 没有可用端口
 }
 
-static net_err_t udp_pkt_invalid(udp_pkt_t* pkt, const int size)
+static net_err_t udp_pkt_invalid(const udp_pkt_t* pkt, const int size)
 {
     if (size < (int)sizeof(udp_header_t))
+    {
+        return NET_ERR_FRAME;
+    }
+
+    uint16_t udp_len = pkt->header.length;
+    if (udp_len < sizeof(udp_header_t) || udp_len > (uint16_t)size)
     {
         return NET_ERR_FRAME;
     }
@@ -106,12 +112,17 @@ static net_err_t udp_sendto(sock_t* sock, const uint8_t* buf, const size_t len, 
         return err;
     }
 
+    ipaddr_t src_ip;
     if (ipaddr_is_any(&sock->local_ip))
     {
-        sock->local_ip = netif_get_default()->ipaddr;
+        src_ip = netif_get_default()->ipaddr;
+    }
+    else
+    {
+        src_ip = sock->local_ip;
     }
 
-    err = upd_output(&dest_ip, dest_port, &sock->local_ip, sock->local_port, pktbuf);
+    err = upd_output(&dest_ip, dest_port, &src_ip, sock->local_port, pktbuf);
     if (err != NET_ERR_OK)
     {
         dbug_error(DBG_MOD_UDP, "raw_sendto: ipv4_output failed, err=%d", err);
@@ -136,11 +147,19 @@ static net_err_t udp_recvfrom(sock_t* sock, uint8_t* buf, const size_t len, int 
 
     udp_from_t* from = (udp_from_t*)pktbuf_data(pktbuf);
 
-    struct x_sockaddr_in* addr = (struct x_sockaddr_in*)src;
-    plat_memset(addr, 0, sizeof(struct x_sockaddr_in));
-    addr->sin_family = AF_INET;
-    addr->sin_port = x_htons(from->src_port);
-    ipaddr_to_buf(&from->src_ip, addr->sin_addr.addr_array);
+    if (src != NULL)
+    {
+        struct x_sockaddr_in* addr = (struct x_sockaddr_in*)src;
+        plat_memset(addr, 0, sizeof(struct x_sockaddr_in));
+        addr->sin_len = sizeof(struct x_sockaddr_in);
+        addr->sin_family = AF_INET;
+        addr->sin_port = x_htons(from->src_port);
+        ipaddr_to_buf(&from->src_ip, addr->sin_addr.addr_array);
+    }
+    if (src_len != NULL)
+    {
+        *src_len = sizeof(struct x_sockaddr_in);
+    }
 
     pktbuf_remove_header(pktbuf, sizeof(udp_from_t));
 
@@ -149,7 +168,7 @@ static net_err_t udp_recvfrom(sock_t* sock, uint8_t* buf, const size_t len, int 
     net_err_t err = pktbuf_read(pktbuf, buf, (int)copy_size);
     if (err != NET_ERR_OK)
     {
-        dbug_error(DBG_MOD_RAW, "udp_recvfrom: pktbuf_read failed, err=%d", err);
+        dbug_error(DBG_MOD_UDP, "udp_recvfrom: pktbuf_read failed, err=%d", err);
         pktbuf_free(pktbuf);
         return err;
     }
@@ -288,21 +307,52 @@ net_err_t upd_output(const ipaddr_t* dest_ip, const uint16_t dest_port, const ip
 }
 
 static udp_t* udp_find(const ipaddr_t* src_ip, const uint16_t src_port, const ipaddr_t* dest_ip,
-                       const uint16_t dest_port)
+                       const uint16_t dest_port, bool* weak_match_used)
 {
+    if (weak_match_used)
+    {
+        *weak_match_used = false;
+    }
+    udp_t* weak_match = NULL;
+
     nlist_node_t* node;
     nlist_for_each(node, &udp_list)
     {
         udp_t* udp = nlist_entry(node, udp_t, base.node);
-        if (udp->base.local_port == dest_port &&
-            (ipaddr_is_any(&udp->base.local_ip) || ipaddr_is_equal(&udp->base.local_ip, dest_ip)) &&
-            (ipaddr_is_any(&udp->base.remote_ip) || ipaddr_is_equal(&udp->base.remote_ip, src_ip)) &&
-            (udp->base.remote_port == 0 || udp->base.remote_port == src_port))
+
+        if (udp->base.local_port != dest_port)
+        {
+            continue;
+        }
+
+        if (!ipaddr_is_any(&udp->base.local_ip) && !ipaddr_is_equal(&udp->base.local_ip, dest_ip))
+        {
+            continue;
+        }
+
+        bool remote_ip_match = ipaddr_is_any(&udp->base.remote_ip) || ipaddr_is_equal(&udp->base.remote_ip, src_ip);
+        bool remote_port_match = (udp->base.remote_port == 0 || udp->base.remote_port == src_port);
+        if (remote_ip_match && remote_port_match)
         {
             return udp;
         }
+
+        // 某些场景下，回包源IP会被网关/NAT改写；在本地端口唯一时，允许降级匹配
+        if (!remote_ip_match && remote_port_match && weak_match == NULL)
+        {
+            weak_match = udp;
+        }
     }
-    return NULL;
+
+    if (weak_match)
+    {
+        dbug_info(DBG_MOD_UDP, "udp_find: peer ip mismatch, fallback by local port");
+        if (weak_match_used)
+        {
+            *weak_match_used = true;
+        }
+    }
+    return weak_match;
 }
 
 net_err_t udp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_ip)
@@ -329,30 +379,70 @@ net_err_t udp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_
     uint16_t remote_port = x_ntohs(udp_pkt->header.src_port);
     uint16_t local_port = x_ntohs(udp_pkt->header.dest_port);
 
-    udp_t* udp = udp_find(src_ip, remote_port, dest_ip, local_port);
+    bool weak_match = false;
+    udp_t* udp = udp_find(src_ip, remote_port, dest_ip, local_port, &weak_match);
     if (udp == NULL)
     {
-        dbug_warn(DBG_MOD_UDP, "udp_input: no matching socket for dest port %d", local_port);
+        dbug_warn(DBG_MOD_UDP,
+                  "udp_input: no matching socket, src=%u.%u.%u.%u:%u dst=%u.%u.%u.%u:%u",
+                  src_ip->a_addr[0], src_ip->a_addr[1], src_ip->a_addr[2], src_ip->a_addr[3], remote_port,
+                  dest_ip->a_addr[0], dest_ip->a_addr[1], dest_ip->a_addr[2], dest_ip->a_addr[3], local_port);
         return NET_ERR_PORT_UNREACH;
     }
 
     pktbuf_remove_header(buf, ip_hdr_size);
 
     udp_pkt = (udp_pkt_t*)pktbuf_data(buf);
+    uint16_t udp_len = x_ntohs(udp_pkt->header.length);
+    if (udp_len < sizeof(udp_header_t) || udp_len > (uint16_t)buf->total_size)
+    {
+        dbug_warn(DBG_MOD_UDP, "udp_input: invalid packet");
+        return NET_ERR_FRAME;
+    }
+    if (buf->total_size > udp_len)
+    {
+        err = pktbuf_resize(buf, udp_len);
+        if (err != NET_ERR_OK)
+        {
+            dbug_warn(DBG_MOD_UDP, "udp_input: resize pkt failed");
+            return err;
+        }
+        udp_pkt = (udp_pkt_t*)pktbuf_data(buf);
+    }
+
     if (udp_pkt->header.checksum != 0)
     {
         pktbuf_reset_access(buf);
         uint16_t checksum = checksum16_pseudo(buf, src_ip, dest_ip, IPPROTO_UDP);
         if (checksum != 0)
         {
-            dbug_warn(DBG_MOD_UDP, "udp_input: invalid checksum");
-            return NET_ERR_CHECKSUM;
+            bool accepted_with_connected_peer_ip = false;
+            if (weak_match && !ipaddr_is_any(&udp->base.remote_ip))
+            {
+                // 网关/NAT改写源IP但未同步更新校验和时，按已连接的对端IP再校验一次
+                pktbuf_reset_access(buf);
+                checksum = checksum16_pseudo(buf, &udp->base.remote_ip, dest_ip, IPPROTO_UDP);
+                accepted_with_connected_peer_ip = (checksum == 0);
+            }
+
+            if (!accepted_with_connected_peer_ip)
+            {
+                if (!(weak_match && !ipaddr_is_any(&udp->base.remote_ip)))
+                {
+                    dbug_warn(DBG_MOD_UDP, "udp_input: invalid checksum");
+                    return NET_ERR_CHECKSUM;
+                }
+
+                dbug_info(DBG_MOD_UDP, "udp_input: checksum mismatch under weak peer match, accepted");
+            }
+
+            dbug_info(DBG_MOD_UDP, "udp_input: checksum mismatch on rewritten src ip, accepted by connected peer");
         }
     }
 
     udp_pkt->header.dest_port = x_ntohs(udp_pkt->header.dest_port);
     udp_pkt->header.src_port = x_ntohs(udp_pkt->header.src_port);
-    udp_pkt->header.length = x_ntohs(udp_pkt->header.length);
+    udp_pkt->header.length = udp_len;
     if ((err = udp_pkt_invalid(udp_pkt, (int)buf->total_size)) != NET_ERR_OK)
     {
         dbug_warn(DBG_MOD_UDP, "udp_input: invalid packet");
@@ -374,13 +464,19 @@ net_err_t udp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_
     }
 
     udp_from_t* from = (udp_from_t*)pktbuf_data(buf);
-    ipaddr_copy(&from->src_ip, src_ip);
+    if (weak_match && !ipaddr_is_any(&udp->base.remote_ip))
+    {
+        ipaddr_copy(&from->src_ip, &udp->base.remote_ip);
+    }
+    else
+    {
+        ipaddr_copy(&from->src_ip, src_ip);
+    }
     from->src_port = remote_port;
 
     if (nlist_count(&udp->recv_list) >= UDP_RECV_QUEUE_LEN)
     {
         dbug_warn(DBG_MOD_UDP, "udp_input: recv queue full for port %d", local_port);
-        pktbuf_free(buf);
         return NET_ERR_MEM;
     }
 
