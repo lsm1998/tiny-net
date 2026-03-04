@@ -358,3 +358,12 @@ int x_setsockopt(const int fd, const int level, int opt_name, const void* opt_va
     }
     return req.fd;
 }
+
+int x_getaddrinfo(const char* node, const char* service, const struct x_addrinfo* hints, struct x_addrinfo** res)
+{
+    return -1;
+}
+
+void x_freeaddrinfo(struct x_addrinfo* res)
+{
+}

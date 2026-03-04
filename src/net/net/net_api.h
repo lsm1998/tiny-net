@@ -19,6 +19,8 @@
 #undef ntohl
 #define ntohl x_ntohl
 
+#define addrinfo x_addrinfo
+
 char* x_inet_ntoa(struct in_addr in);
 
 uint32_t x_inet_addr(const char* cp);
@@ -73,6 +75,8 @@ const char* x_inet_ntop(int family, const void* src, char* dst, size_t size);
 
 #define recvfrom(fd, buf, len, flags, addr, addrlen) x_recvfrom(fd, buf, len, flags, addr, addrlen)
 
+#define getaddrinfo(hostname, service, hints, res) x_getaddrinfo(hostname, service, hints, res)
 
+#define freeaddrinfo(res) x_freeaddrinfo(res)
 
 #endif //TINY_NET_NET_API_H

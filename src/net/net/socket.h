@@ -101,6 +101,18 @@ struct x_sockaddr_in
     char sin_zero[8]; // 填充字节
 };
 
+struct x_addrinfo
+{
+    int ai_flags;
+    int ai_family;
+    int ai_socktype;
+    int ai_protocol;
+    x_socklen_t ai_addrlen;
+    char* ai_canonname;
+    struct x_sockaddr* ai_addr;
+    struct x_addrinfo* ai_next;
+};
+
 // struct x_socketaddr
 // {
 //     uint8_t sa_len;
@@ -138,5 +150,9 @@ ssize_t x_write(int fd, const void* buf, size_t len);
 int x_close(int fd);
 
 int x_setsockopt(int fd, int level, int opt_name, const void* opt_val, int opt_len);
+
+int x_getaddrinfo(const char* node, const char* service, const struct x_addrinfo* hints, struct x_addrinfo** res);
+
+void x_freeaddrinfo(struct x_addrinfo* res);
 
 #endif //TINY_NET_SOCKET_H
