@@ -210,11 +210,22 @@ net_err_t dns_query_req_in(const func_msg_t* msg)
         dbug_error(DBG_MOD_DNS, "domain name too long: %d > %d", name_len, DNS_DOMAIN_MAX_LEN);
         return NET_ERR_INVALID_PARAM;
     }
+
+    // 是否本身就是IP地址
+    ipaddr_t ipaddr;
+    if (ipaddr4_form_str(&ipaddr, dns_req->domain) == NET_ERR_OK)
+    {
+        dns_req->ipaddr = ipaddr;
+        dns_req->err = NET_ERR_OK;
+        return NET_ERR_OK;
+    }
+
+    // 是否是本地地址
     if (plat_strcmp(dns_req->domain, "localhost") == 0)
     {
         ipaddr4_form_str(&dns_req->ipaddr, "127.0.0.1");
         dns_req->err = NET_ERR_OK;
-        return dns_req->err;
+        return NET_ERR_OK;
     }
     dns_req->err = NET_ERR_OK;
     return NET_ERR_OK;

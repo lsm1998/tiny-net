@@ -3,6 +3,7 @@
 #include "exmsg.h"
 #include "sock.h"
 #include "dns.h"
+#include "tool.h"
 
 int x_socket(const int family, const int type, const int protocol)
 {
@@ -362,8 +363,44 @@ int x_setsockopt(const int fd, const int level, int opt_name, const void* opt_va
 
 int x_getaddrinfo(const char* node, const char* service, const struct x_addrinfo* hints, struct x_addrinfo** res)
 {
+    if (node == NULL || res == NULL)
+    {
+        return NET_ERR_INVALID_PARAM;
+    }
+    // if (hints && hints->ai_family != 0 && hints->ai_family != AF_INET)
+    // {
+    //     return NET_ERR_ADDR;
+    // }
+
+    *res = NULL;
+
+    uint16_t port = 0;
+    if (service && *service)
+    {
+        uint32_t port_value = 0;
+        for (const char* c = service; *c; c++)
+        {
+            if (*c < '0' || *c > '9')
+            {
+                return NET_ERR_INVALID_PARAM;
+            }
+            port_value = port_value * 10 + (uint32_t)(*c - '0');
+            if (port_value > 65535)
+            {
+                return NET_ERR_INVALID_PARAM;
+            }
+        }
+        port = (uint16_t)port_value;
+    }
+
     dns_req_t* req = dns_alloc_req();
+    if (req == NULL)
+    {
+        return NET_ERR_MEM;
+    }
+
     plat_strncpy(req->domain, node, DNS_DOMAIN_MAX_LEN);
+    req->domain[DNS_DOMAIN_MAX_LEN - 1] = '\0';
     ipaddr_set_any(&req->ipaddr);
     req->err = NET_ERR_OK;
 
@@ -394,27 +431,30 @@ int x_getaddrinfo(const char* node, const char* service, const struct x_addrinfo
         goto dns_req_err;
     }
 
+    ai->ai_flags = hints ? hints->ai_flags : 0;
     ai->ai_family = AF_INET;
     ai->ai_socktype = hints ? hints->ai_socktype : 0;
     ai->ai_protocol = hints ? hints->ai_protocol : 0;
     ai->ai_addrlen = sizeof(struct x_sockaddr_in);
-    ai->ai_addr = malloc(sizeof(struct x_sockaddr_in));
+    ai->ai_addr = (struct x_sockaddr*)malloc(sizeof(struct x_sockaddr_in));
     if (ai->ai_addr == NULL)
     {
         free(ai);
         err = NET_ERR_MEM;
         goto dns_req_err;
     }
-    ai->ai_addr->sa_data[0] = req->ipaddr.a_addr[0];
-    ai->ai_addr->sa_data[1] = req->ipaddr.a_addr[1];
-    ai->ai_addr->sa_data[2] = req->ipaddr.a_addr[2];
-    ai->ai_addr->sa_data[3] = req->ipaddr.a_addr[3];
-    ai->ai_addr->sa_family = AF_INET;
-    ai->ai_addr->sa_len = sizeof(struct x_sockaddr_in);
+
+    struct x_sockaddr_in* addr_in = (struct x_sockaddr_in*)ai->ai_addr;
+    plat_memset(addr_in, 0, sizeof(struct x_sockaddr_in));
+    addr_in->sin_len = sizeof(struct x_sockaddr_in);
+    addr_in->sin_family = AF_INET;
+    addr_in->sin_port = x_htons(port);
+    ipaddr_to_buf(&req->ipaddr, addr_in->sin_addr.addr_array);
+
     ai->ai_canonname = NULL;
     ai->ai_next = NULL;
-
     *res = ai;
+    err = NET_ERR_OK;
 
 dns_req_err:
     dns_free_req(req);

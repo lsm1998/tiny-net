@@ -1,9 +1,14 @@
 #include "net_api.h"
 #include "strings.h"
 
-char* x_inet_ntoa(struct in_addr in)
+char* x_inet_ntoa(const struct in_addr in)
 {
-    return 0;
+    static char ip_buf[INET_ADDRSTRLEN];
+    if (x_inet_ntop(AF_INET, in.addr_array, ip_buf, sizeof(ip_buf)) == NULL)
+    {
+        return NULL;
+    }
+    return ip_buf;
 }
 
 uint32_t x_inet_addr(const char* cp)
