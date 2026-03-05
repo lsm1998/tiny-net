@@ -1,5 +1,6 @@
 #include "udp.h"
 #include "dbug.h"
+#include "dns.h"
 #include "mblock.h"
 #include "socket.h"
 #include "ipv4.h"
@@ -477,6 +478,14 @@ net_err_t udp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_
     }
 
     nlist_insert_last(&udp->recv_list, &buf->node);
-    sock_wakeup(&udp->base,SOCK_WAIT_READ, NET_ERR_OK);
+    if (dns_is_arrival(udp))
+    {
+        dbug_info(DBG_MOD_UDP, "udp_input: dns response arrived");
+        dns_in();
+    }
+    else
+    {
+        sock_wakeup(&udp->base,SOCK_WAIT_READ, NET_ERR_OK);
+    }
     return NET_ERR_OK;
 }

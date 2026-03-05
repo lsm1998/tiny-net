@@ -5,6 +5,7 @@
 #include "net_err.h"
 #include "net_cfg.h"
 #include "exmsg.h"
+#include "udp.h"
 
 #define DNS_QUERY_CLASS_INET            1     // 查询类：1 - 表示互联网类
 #define DNS_QUERY_TYPE_A                1       // IPv4地址纪录
@@ -89,5 +90,7 @@ dns_req_t* dns_alloc_req();
 void dns_free_req(dns_req_t* req);
 
 net_err_t dns_query_req_in(const func_msg_t* msg);
+
+bool dns_is_arrival(const udp_t* udp);
 
 #endif //TINY_NET_DNS_H

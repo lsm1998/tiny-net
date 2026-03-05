@@ -179,6 +179,7 @@ void dns_init()
 
 void dns_in()
 {
+
 }
 
 dns_req_t* dns_alloc_req()
@@ -245,5 +246,10 @@ net_err_t dns_query_req_in(const func_msg_t* msg)
     }
 
     dns_req->err = NET_ERR_OK;
-    return NET_ERR_OK;
+    return NET_ERR_NEED_WAIT;
+}
+
+bool dns_is_arrival(const udp_t* udp)
+{
+    return udp == dns_udp;
 }

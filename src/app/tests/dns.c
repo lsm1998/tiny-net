@@ -1,8 +1,10 @@
 #include "net_api.h"
 #include "common.h"
+#include "dbug_module.h"
 
 int main()
 {
+    dbug_module_enable_only(DBG_MOD_DNS);
     tiny_net_init();
     char* dest = "www.baidu.com";
     // char* dest = "localhost";
