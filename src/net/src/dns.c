@@ -179,7 +179,33 @@ void dns_init()
 
 void dns_in()
 {
+    struct x_sockaddr_in src;
+    plat_memset(&src, 0, sizeof(src));
+    x_socklen_t addr_len = sizeof(src);
+    ssize_t recv_len;
+    net_err_t err = udp_recvfrom((sock_t*)dns_udp, working_buf, sizeof(working_buf), 0,
+                                 (const struct x_sockaddr*)&src, &addr_len, &recv_len);
+    if (err != NET_ERR_OK)
+    {
+        dbug_error(DBG_MOD_DNS, "dns_in: udp_recvfrom failed, err=%d", err);
+        return;
+    }
 
+    dns_header_t* header = (dns_header_t*)working_buf;
+    if (recv_len < sizeof(dns_header_t) || (header->flags.all & htons(0x8000)) == 0)
+    {
+        dbug_warn(DBG_MOD_DNS, "dns_in: invalid dns response");
+        return;
+    }
+    header->id = x_ntohs(header->id);
+    header->flags.all = x_ntohs(header->flags.all);
+    header->qdcount = x_ntohs(header->qdcount);
+    header->ancount = x_ntohs(header->ancount);
+    header->nscount = x_ntohs(header->nscount);
+    header->arcount = x_ntohs(header->arcount);
+    dbug_info(DBG_MOD_DNS,
+              "dns_in: recv dns response, id=%d, flags=0x%04x, qdcount=%d, ancount=%d, nscount=%d, arcount=%d",
+              header->id, header->flags.all, header->qdcount, header->ancount, header->nscount, header->arcount);
 }
 
 dns_req_t* dns_alloc_req()
