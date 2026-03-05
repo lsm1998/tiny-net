@@ -51,4 +51,7 @@ net_err_t udp_sendto(sock_t* sock, const uint8_t* buf, size_t len, int flags,
 net_err_t udp_recvfrom(sock_t* sock, uint8_t* buf, size_t len, int flags,
                        const struct x_sockaddr* src, x_socklen_t* src_len, ssize_t* recv_size);
 
+udp_t* udp_find(const ipaddr_t* src_ip, uint16_t src_port, const ipaddr_t* dest_ip,
+                uint16_t dest_port, bool* weak_match_used);
+
 #endif //TINY_NET_UDP_H

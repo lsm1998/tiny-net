@@ -179,7 +179,6 @@ void dns_init()
 
 void dns_in()
 {
-
 }
 
 dns_req_t* dns_alloc_req()
@@ -204,7 +203,19 @@ void dns_free_req(dns_req_t* req)
 
 net_err_t dns_query_req_in(const func_msg_t* msg)
 {
-    dns_req_remove(NULL, NET_ERR_OK);
-    dns_req_fail(NULL, NET_ERR_OK);
+    dns_req_t* dns_req = msg->arg;
+    size_t name_len = plat_strlen(dns_req->domain);
+    if (name_len >= DNS_DOMAIN_MAX_LEN)
+    {
+        dbug_error(DBG_MOD_DNS, "domain name too long: %d > %d", name_len, DNS_DOMAIN_MAX_LEN);
+        return NET_ERR_INVALID_PARAM;
+    }
+    if (plat_strcmp(dns_req->domain, "localhost") == 0)
+    {
+        ipaddr4_form_str(&dns_req->ipaddr, "127.0.0.1");
+        dns_req->err = NET_ERR_OK;
+        return dns_req->err;
+    }
+    dns_req->err = NET_ERR_OK;
     return NET_ERR_OK;
 }

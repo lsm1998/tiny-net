@@ -306,8 +306,8 @@ net_err_t upd_output(const ipaddr_t* dest_ip, const uint16_t dest_port, const ip
     return NET_ERR_OK;
 }
 
-static udp_t* udp_find(const ipaddr_t* src_ip, const uint16_t src_port, const ipaddr_t* dest_ip,
-                       const uint16_t dest_port, bool* weak_match_used)
+udp_t* udp_find(const ipaddr_t* src_ip, const uint16_t src_port, const ipaddr_t* dest_ip,
+                const uint16_t dest_port, bool* weak_match_used)
 {
     if (weak_match_used)
     {
@@ -432,11 +432,7 @@ net_err_t udp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_
                     dbug_warn(DBG_MOD_UDP, "udp_input: invalid checksum");
                     return NET_ERR_CHECKSUM;
                 }
-
-                dbug_info(DBG_MOD_UDP, "udp_input: checksum mismatch under weak peer match, accepted");
             }
-
-            dbug_info(DBG_MOD_UDP, "udp_input: checksum mismatch on rewritten src ip, accepted by connected peer");
         }
     }
 

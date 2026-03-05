@@ -372,7 +372,7 @@ int x_getaddrinfo(const char* node, const char* service, const struct x_addrinfo
     {
         goto dns_req_err;
     }
-    if (req->wait_sem != SYS_SEM_INVALID && sys_sem_wait(req->wait_sem, 0) < 0)
+    if (err == NET_ERR_NEED_WAIT && req->wait_sem != SYS_SEM_INVALID && sys_sem_wait(req->wait_sem, 0) < 0)
     {
         dbug_error(DBG_MOD_DNS, "x_getaddrinfo: wait failed, err=%d", err);
         err = NET_ERR_TIMEOUT;
@@ -405,17 +405,15 @@ int x_getaddrinfo(const char* node, const char* service, const struct x_addrinfo
         err = NET_ERR_MEM;
         goto dns_req_err;
     }
-    struct x_sockaddr_in* addr_in = (struct x_sockaddr_in*)ai->ai_addr;
-    addr_in->sin_len = sizeof(struct x_sockaddr_in);
-    addr_in->sin_family = AF_INET;
-    addr_in->sin_port = 0;
-    addr_in->sin_addr.addr0 = req->ipaddr.a_addr[0];
-    addr_in->sin_addr.addr1 = req->ipaddr.a_addr[1];
-    addr_in->sin_addr.addr2 = req->ipaddr.a_addr[2];
-    addr_in->sin_addr.addr3 = req->ipaddr.a_addr[3];
-    ai->ai_addr = (struct x_sockaddr*)addr_in;
+    ai->ai_addr->sa_data[0] = req->ipaddr.a_addr[0];
+    ai->ai_addr->sa_data[1] = req->ipaddr.a_addr[1];
+    ai->ai_addr->sa_data[2] = req->ipaddr.a_addr[2];
+    ai->ai_addr->sa_data[3] = req->ipaddr.a_addr[3];
+    ai->ai_addr->sa_family = AF_INET;
+    ai->ai_addr->sa_len = sizeof(struct x_sockaddr_in);
     ai->ai_canonname = NULL;
     ai->ai_next = NULL;
+
     *res = ai;
 
 dns_req_err:
