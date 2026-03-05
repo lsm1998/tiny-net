@@ -115,8 +115,9 @@ static net_err_t dns_send_query(const dns_req_t* req)
     dest.sin_port = htons(DNS_PORT_DEFAULT);
     dest.sin_addr.s_addr = x_inet_addr(DNS_SERVER_IP_DEFAULT);
 
+    ssize_t res;
     return udp_sendto((sock_t*)dns_udp, working_buf, buf - working_buf, 0,
-                      (const struct x_sockaddr*)&dest, sizeof(dest), (ssize_t*)0);
+                      (const struct x_sockaddr*)&dest, sizeof(dest), &res);
 }
 
 static void dns_update_timeout(net_timer_t* timer, void* arg)

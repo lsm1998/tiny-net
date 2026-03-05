@@ -4,8 +4,8 @@
 int main()
 {
     tiny_net_init();
-    // char* dest = "www.baidu.com";
-    char* dest = "localhost";
+    char* dest = "www.baidu.com";
+    // char* dest = "localhost";
     struct addrinfo hints, *res;
 
     memset(&hints, 0, sizeof(hints));
