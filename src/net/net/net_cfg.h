@@ -149,7 +149,13 @@
 // DNS查询超时重试间隔，单位秒
 #define DNS_QUERY_RETRY_TMO 5
 
+// DNS查询最大重试次数
+#define DNS_QUERY_RETRY_CNT 3
+
 // DNS默认端口号
 #define DNS_PORT_DEFAULT 53
+
+// DNS默认服务器IP地址
+#define DNS_SERVER_IP_DEFAULT "8.8.8.8"
 
 #endif //TINY_NET_NET_CFG_H

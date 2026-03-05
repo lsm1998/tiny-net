@@ -45,7 +45,7 @@ static void dns_req_fail(dns_req_t* req, const net_err_t err)
     dns_req_remove(req, err);
 }
 
-static uint8_t* add_query_field(const char* domain_name, char* buf, size_t size)
+static uint8_t* add_query_field(const char* domain_name, char* buf, const size_t size)
 {
     // 检查长度大小：包含字符串有效长，开头的.和结束的'\0'
     if (size < (sizeof(dns_qfield_t) + plat_strlen(domain_name) + 2))
@@ -99,7 +99,6 @@ static net_err_t dns_send_query(const dns_req_t* req)
     dns_hdr->nscount = 0;
     dns_hdr->arcount = 0;
 
-
     // 填充1个问题区段
     uint8_t* buf = working_buf + sizeof(dns_header_t);
     buf = add_query_field(req->domain, (char*)buf, sizeof(working_buf) - (buf - working_buf));
@@ -114,7 +113,7 @@ static net_err_t dns_send_query(const dns_req_t* req)
     plat_memset(&dest, 0, sizeof(dest));
     dest.sin_family = AF_INET;
     dest.sin_port = htons(DNS_PORT_DEFAULT);
-    dest.sin_addr.s_addr = x_inet_addr("8.8.8.8");
+    dest.sin_addr.s_addr = x_inet_addr(DNS_SERVER_IP_DEFAULT);
 
     return udp_sendto((sock_t*)dns_udp, working_buf, buf - working_buf, 0,
                       (const struct x_sockaddr*)&dest, sizeof(dest), (ssize_t*)0);
@@ -227,6 +226,23 @@ net_err_t dns_query_req_in(const func_msg_t* msg)
         dns_req->err = NET_ERR_OK;
         return NET_ERR_OK;
     }
+
+    // 其他情况，发起DNS查询
+    dns_req_t query_req;
+    plat_memset(&query_req, 0, sizeof(query_req));
+    plat_strncpy(query_req.domain, dns_req->domain, DNS_DOMAIN_MAX_LEN);
+    query_req.domain[DNS_DOMAIN_MAX_LEN - 1] = '\0';
+    query_req.query_id = ++id;
+    query_req.retry_cnt = DNS_QUERY_RETRY_CNT;
+    query_req.retry_timeout = DNS_QUERY_RETRY_TMO;
+    query_req.wait_sem = dns_req->wait_sem;
+    dns_req->err = dns_send_query(&query_req);
+    if (dns_req->err != NET_ERR_OK)
+    {
+        dbug_error(DBG_MOD_DNS, "dns_query_req_in: send query failed, err=%d", dns_req->err);
+        return dns_req->err;
+    }
+
     dns_req->err = NET_ERR_OK;
     return NET_ERR_OK;
 }
