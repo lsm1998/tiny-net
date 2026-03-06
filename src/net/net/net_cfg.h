@@ -158,4 +158,7 @@
 // DNS默认服务器IP地址
 #define DNS_SERVER_IP_DEFAULT "8.8.8.8"
 
+// IPv4地址长度
+#define IPV4_ADDR_SIZE 4
+
 #endif //TINY_NET_NET_CFG_H

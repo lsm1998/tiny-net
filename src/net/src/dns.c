@@ -14,6 +14,33 @@ static mblock_t req_mblock; // 请求分配结构
 static dns_req_t dns_req_list[DNS_REQ_SIZE];
 static uint8_t working_buf[DNS_WORKING_BUF_SIZE];
 
+static const uint8_t* domain_name_skip(const uint8_t* name, size_t size)
+{
+    const uint8_t* c = name;
+    const uint8_t* end = name + size;
+    while (*c && c < end)
+    {
+        // 压缩标签，2个字节；非压缩，取计数累加
+        if ((*c & 0xc0) == 0xc0)
+        {
+            // 一个域名仅能包含一个指针，要么只有两个字节就只包含一个指针，要么只在结尾部分跟随一个指针
+            // 压缩标签无需以'\0'结束
+            c += 2;
+            goto skip_end;
+        }
+        c += *c;
+    }
+
+    // 非压缩标签没有'\0'，这里针对普通标签判断，跳过'\0'
+    if (*c == '\0')
+    {
+        c++;
+    }
+skip_end:
+    // 跳过字符符结束符'\0'
+    return c >= end ? (const uint8_t*)0 : c;
+}
+
 static void dns_entry_free(dns_entry_t* entry)
 {
     ipaddr_set_any(&entry->ipaddr);
@@ -37,6 +64,44 @@ static void dns_req_remove(dns_req_t* req, const net_err_t err)
         sys_sem_free(req->wait_sem);
         req->wait_sem = SYS_SEM_INVALID;
     }
+}
+
+static void dns_entry_init(dns_entry_t* entry, const char* domain_name, int ttl, ipaddr_t* ipaddr)
+{
+    entry->ttl = ttl;
+    ipaddr_copy(&entry->ipaddr, ipaddr);
+    plat_strncpy(entry->domain_name, domain_name, DNS_DOMAIN_MAX_LEN - 1);
+    entry->domain_name[DNS_DOMAIN_MAX_LEN - 1] = '\0';
+}
+
+static void dns_entry_insert(const char* domain_name, int ttl, ipaddr_t* ipaddr)
+{
+    dns_entry_t* free = NULL;
+    dns_entry_t* oldest = NULL;
+
+    // 空闲， 老的
+    for (int i = 0; i < DNS_ENTRY_SIZE; i++)
+    {
+        dns_entry_t* entry = dns_entry_tbl + i;
+
+        if (ipaddr_is_any(&entry->ipaddr))
+        {
+            free = entry;
+            break;
+        }
+
+        if ((oldest == (dns_entry_t*)0) || (entry->ttl < oldest->ttl))
+        {
+            oldest = entry;
+        }
+    }
+
+    if (free == (dns_entry_t*)0)
+    {
+        free = oldest;
+    }
+
+    dns_entry_init(free, domain_name, ttl, ipaddr);
 }
 
 static void dns_req_fail(dns_req_t* req, const net_err_t err)
@@ -191,6 +256,9 @@ void dns_in()
         return;
     }
 
+    const uint8_t* rcv_start = working_buf;
+    const uint8_t* rcv_end = working_buf + recv_len;
+
     dns_header_t* header = (dns_header_t*)working_buf;
     if (recv_len < sizeof(dns_header_t) || (header->flags.all & htons(0x8000)) == 0)
     {
@@ -207,7 +275,7 @@ void dns_in()
               "dns_in: recv dns response, id=%d, flags=0x%04x, qdcount=%d, ancount=%d, nscount=%d, arcount=%d",
               header->id, header->flags.all, header->qdcount, header->ancount, header->nscount, header->arcount);
 
-    nlist_node_t *curr;
+    nlist_node_t* curr;
     nlist_for_each(curr, &req_list)
     {
         dns_req_t* req = nlist_entry(curr, dns_req_t, node);
@@ -215,8 +283,63 @@ void dns_in()
         {
             continue;
         }
-        // 找到对应的请求，解析结果
-        uint8_t* buf = working_buf + sizeof(dns_header_t);
+        if (header->flags.qr == 0)
+        {
+            dbug_warn(DBG_MOD_DNS, "not a responsed");
+            goto req_failure;
+        }
+        // 不允许截断的消息
+        if (header->flags.tc == 1)
+        {
+            dbug_warn(DBG_MOD_DNS, "response truncated");
+            goto req_failure;
+        }
+        // 只处理A记录的响应
+        if (header->ancount == 0)
+        {
+            dbug_warn(DBG_MOD_DNS, "no answer");
+            goto req_failure;
+        }
+        for (int i = 0; i < header->ancount && rcv_start < rcv_end; i++)
+        {
+            // 跳过域名，不做检查
+            rcv_start = domain_name_skip(rcv_start, rcv_end - rcv_start);
+            if (rcv_start == (uint8_t*)0)
+            {
+                dbug_warn(DBG_MOD_DNS, "size error");
+                err = NET_ERR_FORMAT;
+                goto req_failure;
+            }
+            // 检查其余字段，首先空间要够
+            if (rcv_start + sizeof(dns_afield_t) > rcv_end)
+            {
+                dbug_warn(DBG_MOD_DNS, "size error");
+                err = NET_ERR_FORMAT;
+                goto req_failure;
+            }
+
+            // 进行必要的检查后取结果
+            dns_afield_t* af = (dns_afield_t*)rcv_start;
+            if (af->class == ntohs(DNS_QUERY_CLASS_INET)
+                && af->type == ntohs(DNS_QUERY_TYPE_A)
+                && af->rd_len == ntohs(IPV4_ADDR_SIZE))
+            {
+                // 获取IP地址，同时往缓存表中插入新表项
+                ipaddr_from_buf(&req->ipaddr, (uint8_t*)af->rdata);
+                dns_entry_insert(req->domain, ntohl(af->ttl), &req->ipaddr);
+
+                dbug_info(DBG_MOD_DNS, "recv dns A type: %s %s", req->domain);
+
+                // 给应用发通知，通知解析完毕，退出解析
+                dns_req_remove(req, NET_ERR_OK);
+                return;
+            }
+
+            rcv_start += sizeof(dns_afield_t) + ntohs(af->rd_len) - 2; // 减去结构体中的2个字节
+        }
+    req_failure:
+        dns_req_fail(req, err);
+        return;
     }
 }
 

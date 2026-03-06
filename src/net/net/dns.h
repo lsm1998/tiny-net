@@ -72,6 +72,15 @@ typedef struct dns_qfield_t
     uint16_t type; // 查询类型
     uint16_t class; // 查询类
 } dns_qfield_t;
+
+typedef struct dns_afield_t
+{
+    uint16_t type; // 同上查询类型
+    uint16_t class; // 同上查询类
+    uint32_t ttl; // 结果可以缓存的最大秒数
+    uint16_t rd_len; // rdata中包含的字节数
+    uint16_t rdata[1]; // 资源数据
+} dns_afield_t;
 #pragma pack()
 
 typedef struct dns_entry_t

@@ -29,6 +29,7 @@ typedef enum net_err_t
     NET_ERR_SIZE = -22, // 大小错误
     NET_ERR_UNIMPLEMENTED = -23, // 功能未实现
     NET_ERR_ADDR = -30, // 地址错误
+    NET_ERR_FORMAT = -31, // 格式错误
 } net_err_t;
 
 #endif //TINY_NET_NET_ERR_H
