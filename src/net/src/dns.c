@@ -206,6 +206,18 @@ void dns_in()
     dbug_info(DBG_MOD_DNS,
               "dns_in: recv dns response, id=%d, flags=0x%04x, qdcount=%d, ancount=%d, nscount=%d, arcount=%d",
               header->id, header->flags.all, header->qdcount, header->ancount, header->nscount, header->arcount);
+
+    nlist_node_t *curr;
+    nlist_for_each(curr, &req_list)
+    {
+        dns_req_t* req = nlist_entry(curr, dns_req_t, node);
+        if (req->query_id != header->id)
+        {
+            continue;
+        }
+        // 找到对应的请求，解析结果
+        uint8_t* buf = working_buf + sizeof(dns_header_t);
+    }
 }
 
 dns_req_t* dns_alloc_req()
