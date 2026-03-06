@@ -66,7 +66,17 @@ static void dns_req_remove(dns_req_t* req, const net_err_t err)
     }
 }
 
-static void dns_entry_init(dns_entry_t* entry, const char* domain_name, int ttl, ipaddr_t* ipaddr)
+static void dns_req_add(dns_req_t* req)
+{
+    req->query_id = ++id; // 纪录一下这个ID值以结构中
+    req->err = NET_ERR_OK;
+    req->retry_timeout = DNS_QUERY_RETRY_TMO;
+    req->retry_cnt = DNS_QUERY_RETRY_CNT;
+    ipaddr_set_any(&req->ipaddr);
+    nlist_insert_last(&req_list, &req->node);
+}
+
+static void dns_entry_init(dns_entry_t* entry, const char* domain_name, const int ttl, const ipaddr_t* ipaddr)
 {
     entry->ttl = ttl;
     ipaddr_copy(&entry->ipaddr, ipaddr);
@@ -399,6 +409,8 @@ net_err_t dns_query_req_in(const func_msg_t* msg)
     query_req.retry_cnt = DNS_QUERY_RETRY_CNT;
     query_req.retry_timeout = DNS_QUERY_RETRY_TMO;
     query_req.wait_sem = dns_req->wait_sem;
+    // 插入请求队列中，并发送请求
+    dns_req_add(dns_req);
     dns_req->err = dns_send_query(&query_req);
     if (dns_req->err != NET_ERR_OK)
     {
