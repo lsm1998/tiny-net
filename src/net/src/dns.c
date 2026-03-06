@@ -18,27 +18,36 @@ static const uint8_t* domain_name_skip(const uint8_t* name, size_t size)
 {
     const uint8_t* c = name;
     const uint8_t* end = name + size;
-    while (*c && c < end)
+    while (c < end && *c)
     {
         // 压缩标签，2个字节；非压缩，取计数累加
         if ((*c & 0xc0) == 0xc0)
         {
             // 一个域名仅能包含一个指针，要么只有两个字节就只包含一个指针，要么只在结尾部分跟随一个指针
             // 压缩标签无需以'\0'结束
+            if ((end - c) < 2)
+            {
+                return (const uint8_t*)0;
+            }
             c += 2;
             goto skip_end;
         }
-        c += *c;
+
+        uint8_t label_size = *c++;
+        if ((size_t)(end - c) < label_size)
+        {
+            return (const uint8_t*)0;
+        }
+        c += label_size;
     }
 
     // 非压缩标签没有'\0'，这里针对普通标签判断，跳过'\0'
-    if (*c == '\0')
+    if (c < end && *c == '\0')
     {
         c++;
     }
 skip_end:
-    // 跳过字符符结束符'\0'
-    return c >= end ? (const uint8_t*)0 : c;
+    return c <= end ? c : (const uint8_t*)0;
 }
 
 static void dns_entry_free(dns_entry_t* entry)
@@ -61,8 +70,6 @@ static void dns_req_remove(dns_req_t* req, const net_err_t err)
     if (req->wait_sem != SYS_SEM_INVALID)
     {
         sys_sem_notify(req->wait_sem);
-        sys_sem_free(req->wait_sem);
-        req->wait_sem = SYS_SEM_INVALID;
     }
 }
 
@@ -266,7 +273,6 @@ void dns_in()
         return;
     }
 
-    const uint8_t* rcv_start = working_buf;
     const uint8_t* rcv_end = working_buf + recv_len;
 
     dns_header_t* header = (dns_header_t*)working_buf;
@@ -310,18 +316,33 @@ void dns_in()
             dbug_warn(DBG_MOD_DNS, "no answer");
             goto req_failure;
         }
+
+        const uint8_t* rcv_start = working_buf + sizeof(dns_header_t);
+        for (int i = 0; i < header->qdcount; i++)
+        {
+            rcv_start = domain_name_skip(rcv_start, rcv_end - rcv_start);
+            if (rcv_start == (const uint8_t*)0 || (size_t)(rcv_end - rcv_start) < sizeof(dns_qfield_t))
+            {
+                dbug_warn(DBG_MOD_DNS, "question size error");
+                err = NET_ERR_FORMAT;
+                goto req_failure;
+            }
+
+            rcv_start += sizeof(dns_qfield_t);
+        }
+
         for (int i = 0; i < header->ancount && rcv_start < rcv_end; i++)
         {
             // 跳过域名，不做检查
             rcv_start = domain_name_skip(rcv_start, rcv_end - rcv_start);
-            if (rcv_start == (uint8_t*)0)
+            if (rcv_start == (const uint8_t*)0)
             {
                 dbug_warn(DBG_MOD_DNS, "size error");
                 err = NET_ERR_FORMAT;
                 goto req_failure;
             }
             // 检查其余字段，首先空间要够
-            if (rcv_start + sizeof(dns_afield_t) > rcv_end)
+            if ((size_t)(rcv_end - rcv_start) < (sizeof(dns_afield_t) - sizeof(uint16_t)))
             {
                 dbug_warn(DBG_MOD_DNS, "size error");
                 err = NET_ERR_FORMAT;
@@ -330,22 +351,36 @@ void dns_in()
 
             // 进行必要的检查后取结果
             dns_afield_t* af = (dns_afield_t*)rcv_start;
-            if (af->class == ntohs(DNS_QUERY_CLASS_INET)
-                && af->type == ntohs(DNS_QUERY_TYPE_A)
-                && af->rd_len == ntohs(IPV4_ADDR_SIZE))
+            uint16_t af_type = x_ntohs(af->type);
+            uint16_t af_class = x_ntohs(af->class);
+            uint16_t rd_len = x_ntohs(af->rd_len);
+            uint32_t ttl = x_ntohl(af->ttl);
+            size_t af_total_size = sizeof(dns_afield_t) - sizeof(uint16_t) + rd_len;
+            if ((size_t)(rcv_end - rcv_start) < af_total_size)
+            {
+                dbug_warn(DBG_MOD_DNS, "size error");
+                err = NET_ERR_FORMAT;
+                goto req_failure;
+            }
+
+            if (af_class == DNS_QUERY_CLASS_INET
+                && af_type == DNS_QUERY_TYPE_A
+                && rd_len == IPV4_ADDR_SIZE)
             {
                 // 获取IP地址，同时往缓存表中插入新表项
                 ipaddr_from_buf(&req->ipaddr, (uint8_t*)af->rdata);
-                dns_entry_insert(req->domain, ntohl(af->ttl), &req->ipaddr);
+                dns_entry_insert(req->domain, ttl, &req->ipaddr);
 
-                dbug_info(DBG_MOD_DNS, "recv dns A type: %s %s", req->domain);
+                char ip_buf[20];
+                ipaddr_to_str(&req->ipaddr, ip_buf, sizeof(ip_buf));
+                dbug_info(DBG_MOD_DNS, "recv dns A type: %s %s", req->domain, ip_buf);
 
                 // 给应用发通知，通知解析完毕，退出解析
                 dns_req_remove(req, NET_ERR_OK);
                 return;
             }
 
-            rcv_start += sizeof(dns_afield_t) + ntohs(af->rd_len) - 2; // 减去结构体中的2个字节
+            rcv_start += af_total_size;
         }
     req_failure:
         dns_req_fail(req, err);
@@ -368,7 +403,11 @@ void dns_free_req(dns_req_t* req)
 {
     if (req)
     {
-        sys_sem_free(req->wait_sem);
+        if (req->wait_sem != SYS_SEM_INVALID)
+        {
+            sys_sem_free(req->wait_sem);
+            req->wait_sem = SYS_SEM_INVALID;
+        }
         free(req);
     }
 }
@@ -400,20 +439,11 @@ net_err_t dns_query_req_in(const func_msg_t* msg)
         return NET_ERR_OK;
     }
 
-    // 其他情况，发起DNS查询
-    dns_req_t query_req;
-    plat_memset(&query_req, 0, sizeof(query_req));
-    plat_strncpy(query_req.domain, dns_req->domain, DNS_DOMAIN_MAX_LEN);
-    query_req.domain[DNS_DOMAIN_MAX_LEN - 1] = '\0';
-    query_req.query_id = ++id;
-    query_req.retry_cnt = DNS_QUERY_RETRY_CNT;
-    query_req.retry_timeout = DNS_QUERY_RETRY_TMO;
-    query_req.wait_sem = dns_req->wait_sem;
-    // 插入请求队列中，并发送请求
     dns_req_add(dns_req);
-    dns_req->err = dns_send_query(&query_req);
+    dns_req->err = dns_send_query(dns_req);
     if (dns_req->err != NET_ERR_OK)
     {
+        nlist_remove(&req_list, &dns_req->node);
         dbug_error(DBG_MOD_DNS, "dns_query_req_in: send query failed, err=%d", dns_req->err);
         return dns_req->err;
     }
