@@ -4,6 +4,8 @@ project(tiny-net)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(TINY_NET_DBUG "Enable Tiny-Net dbug output" ON)
+
 find_path(PCAP_INCLUDE_DIR pcap.h
         PATHS
         /usr/include
@@ -54,9 +56,16 @@ endforeach ()
 
 target_include_directories(tiny-net PRIVATE ${PCAP_INCLUDE_DIR})
 
+if (TINY_NET_DBUG)
+    add_definitions(-DDBUG_DISPLAY_ENABLED=1)
+else ()
+    add_definitions(-DDBUG_DISPLAY_ENABLED=0)
+endif ()
+
 add_definitions(-DNET_DRIVER_PCAP)
 
 message(STATUS "current platform: ${CMAKE_HOST_SYSTEM_NAME}")
+message(STATUS "Tiny-Net dbug output: ${TINY_NET_DBUG}")
 if (CMAKE_HOST_SYSTEM_NAME MATCHES "Windows")
     add_definitions(-DSYS_PLAT_WINDOWS)
     target_link_libraries(${PROJECT_NAME} wpcap packet Ws2_32)
@@ -66,4 +75,3 @@ else ()
     add_definitions(-DSYS_PLAT_LINUX)
     target_link_libraries(${PROJECT_NAME} pthread pcap)
 endif ()
-
