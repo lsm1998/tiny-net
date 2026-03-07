@@ -71,6 +71,8 @@ const char* x_inet_ntop(int family, const void* src, char* dst, size_t size);
 
 #define setsockopt(fd, level, opt_name, opt_val, opt_len) x_setsockopt(fd, level, opt_name, opt_val, opt_len)
 
+#define select(nfds, readfds, writefds, exceptfds, timeout) x_select(nfds, readfds, writefds, exceptfds, timeout)
+
 #define sendto(fd, buf, len, flags, addr, addrlen) x_sendto(fd, buf, len, flags, addr, addrlen)
 
 #define recvfrom(fd, buf, len, flags, addr, addrlen) x_recvfrom(fd, buf, len, flags, addr, addrlen)

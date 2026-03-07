@@ -2,8 +2,73 @@
 #include "dbug.h"
 #include "exmsg.h"
 #include "sock.h"
+#include "epoll.h"
 #include "dns.h"
 #include "tool.h"
+
+#include <errno.h>
+
+static int socket_err_to_errno(const net_err_t err)
+{
+    switch (err)
+    {
+    case NET_ERR_NEED_WAIT:
+        return EAGAIN;
+    case NET_ERR_MEM:
+        return ENOMEM;
+    case NET_ERR_INVALID_PARAM:
+    case NET_ERR_INVALID_STATE:
+    case NET_ERR_STATE:
+    case NET_ERR_OPTION:
+        return EINVAL;
+    case NET_ERR_TIMEOUT:
+        return ETIMEDOUT;
+    case NET_ERR_FULL:
+        return ENOBUFS;
+    case NET_ERR_PROTOCOL:
+        return EPROTONOSUPPORT;
+    case NET_ERR_NO_ROUTE:
+        return ENETUNREACH;
+    case NET_ERR_PORT_UNREACH:
+        return ECONNREFUSED;
+    case NET_ERR_ADDR_UNSET:
+        return EDESTADDRREQ;
+    case NET_ERR_ADDR_IN_USE:
+        return EADDRINUSE;
+    case NET_ERR_IP_UNREACH:
+    case NET_ERR_TARGET_ADDR_MATCH:
+    case NET_ERR_ADDR:
+        return EHOSTUNREACH;
+    case NET_ERR_REST:
+        return ECONNRESET;
+    case NET_ERR_CLOSE:
+        return EPIPE;
+    case NET_ERR_UNIMPLEMENTED:
+        return ENOSYS;
+    default:
+        return EIO;
+    }
+}
+
+static int socket_fail(const net_err_t err)
+{
+    errno = socket_err_to_errno(err);
+    return -1;
+}
+
+static int socket_is_nonblock(const int fd)
+{
+    sock_t* sock = sock_fd_get_socket(fd);
+    return sock != NULL && sock->nonblock;
+}
+
+static void socket_epoll_recheck(const int fd)
+{
+    if (sock_fd_type(fd) == X_FD_TYPE_SOCKET)
+    {
+        x_epoll_fd_recheck(fd);
+    }
+}
 
 int x_socket(const int family, const int type, const int protocol)
 {
@@ -17,7 +82,7 @@ int x_socket(const int family, const int type, const int protocol)
     net_err_t err = exmsg_func_exec(socket_create_req_in, &req);
     if (err != NET_ERR_OK)
     {
-        return -1;
+        return socket_fail(err);
     }
     return req.fd;
 }
@@ -27,14 +92,17 @@ ssize_t x_sendto(const int fd, const void* buf, size_t len, const int flags, str
 {
     if (buf == NULL || addr == NULL || len == 0)
     {
+        errno = EINVAL;
         return -1;
     }
 
     if (addr->sa_family != AF_INET || addrlen != sizeof(struct sockaddr))
     {
+        errno = EINVAL;
         return -1;
     }
 
+    const int nonblock = socket_is_nonblock(fd);
     uint8_t* send_buf = (uint8_t*)buf;
     ssize_t total_sent = 0;
     while (len > 0)
@@ -46,19 +114,47 @@ ssize_t x_sendto(const int fd, const void* buf, size_t len, const int flags, str
         req.data.buf = send_buf;
         req.data.len = len;
         req.data.flags = flags;
+        req.data.transferred_len = 0;
         req.wait = NULL;
         req.wait_timeout = 0;
 
         net_err_t err = exmsg_func_exec(socket_sendto_req_in, &req);
+        if (err == NET_ERR_NEED_WAIT && nonblock)
+        {
+            socket_epoll_recheck(fd);
+            if (total_sent > 0)
+            {
+                return total_sent;
+            }
+            errno = EAGAIN;
+            return -1;
+        }
         if (err < NET_ERR_OK)
         {
             dbug_error(DBG_MOD_SOCKET, "socket_sendto_req_in sendto failed");
-            return -1;
+            socket_epoll_recheck(fd);
+            return total_sent > 0 ? total_sent : socket_fail(err);
         }
 
-        if (req.wait && (err = sock_wait_enter(req.wait, req.wait_timeout)) < NET_ERR_OK)
+        if (req.wait)
         {
-            dbug_error(DBG_MOD_SOCKET, "socket_sendto: wait failed, err=%d", err);
+            err = sock_wait_enter(req.wait, req.wait_timeout);
+            if (err < NET_ERR_OK)
+            {
+                dbug_error(DBG_MOD_SOCKET, "socket_sendto: wait failed, err=%d", err);
+                socket_epoll_recheck(fd);
+                return total_sent > 0 ? total_sent : socket_fail(err);
+            }
+        }
+
+        if (req.data.transferred_len <= 0)
+        {
+            socket_epoll_recheck(fd);
+            if (total_sent > 0)
+            {
+                return total_sent;
+            }
+            errno = EAGAIN;
             return -1;
         }
 
@@ -66,6 +162,7 @@ ssize_t x_sendto(const int fd, const void* buf, size_t len, const int flags, str
         send_buf += req.data.transferred_len;
         total_sent += req.data.transferred_len;
     }
+    socket_epoll_recheck(fd);
     return total_sent;
 }
 
@@ -74,9 +171,11 @@ ssize_t x_recvfrom(const int fd, void* buf, const size_t len, const int flags, s
 {
     if (buf == NULL || addr == NULL || len == 0 || addrlen == NULL)
     {
+        errno = EINVAL;
         return -1;
     }
 
+    const int nonblock = socket_is_nonblock(fd);
     while (true)
     {
         sock_req_t req;
@@ -91,22 +190,37 @@ ssize_t x_recvfrom(const int fd, void* buf, const size_t len, const int flags, s
         req.data.transferred_len = 0;
 
         net_err_t err = exmsg_func_exec(socket_recvfrom_req_in, &req);
+        if (err == NET_ERR_NEED_WAIT && nonblock)
+        {
+            socket_epoll_recheck(fd);
+            errno = EAGAIN;
+            return -1;
+        }
         if (err < NET_ERR_OK)
         {
             dbug_error(DBG_MOD_SOCKET, "socket_recvfrom_req_in recvfrom failed");
-            return -1;
+            socket_epoll_recheck(fd);
+            return socket_fail(err);
         }
         if (req.data.transferred_len > 0)
         {
+            socket_epoll_recheck(fd);
             return req.data.transferred_len;
         }
 
-        // 等待数据到达
+        if (req.wait == NULL)
+        {
+            socket_epoll_recheck(fd);
+            errno = EAGAIN;
+            return -1;
+        }
+
         err = sock_wait_enter(req.wait, req.wait_timeout);
         if (err < NET_ERR_OK)
         {
             dbug_error(DBG_MOD_SOCKET, "socket_recvfrom: wait failed, err=%d", err);
-            return err;
+            socket_epoll_recheck(fd);
+            return socket_fail(err);
         }
     }
 }
@@ -116,11 +230,13 @@ int x_bind(const int fd, struct x_sockaddr* addr, const x_socklen_t addrlen)
     if (fd < 0 || addr == NULL || addrlen != sizeof(struct x_sockaddr))
     {
         dbug_error(DBG_MOD_SOCKET, "bind param err");
+        errno = EINVAL;
         return -1;
     }
     if (addr->sa_family != AF_INET)
     {
         dbug_error(DBG_MOD_SOCKET, "family err");
+        errno = EINVAL;
         return -1;
     }
 
@@ -133,11 +249,15 @@ int x_bind(const int fd, struct x_sockaddr* addr, const x_socklen_t addrlen)
     net_err_t err = exmsg_func_exec(socket_bind_req_in, &req);
     if (err != NET_ERR_OK)
     {
-        return -1;
+        return socket_fail(err);
     }
     if (req.wait)
     {
-        sock_wait_enter(req.wait, req.wait_timeout);
+        err = sock_wait_enter(req.wait, req.wait_timeout);
+        if (err < NET_ERR_OK)
+        {
+            return socket_fail(err);
+        }
     }
     return 0;
 }
@@ -152,17 +272,19 @@ int x_listen(const int fd, const int backlog)
     net_err_t err = exmsg_func_exec(socket_listen_req_in, &req);
     if (err != NET_ERR_OK)
     {
-        return -1;
+        return socket_fail(err);
     }
-    return NET_ERR_OK;
+    return 0;
 }
 
 int x_accept(const int fd, struct x_sockaddr* addr, x_socklen_t* addrlen)
 {
     if (fd < 0 || addr == NULL || addrlen == NULL || *addrlen != sizeof(struct x_sockaddr))
     {
+        errno = EINVAL;
         return -1;
     }
+    const int nonblock = socket_is_nonblock(fd);
     while (true)
     {
         sock_req_t req;
@@ -173,18 +295,37 @@ int x_accept(const int fd, struct x_sockaddr* addr, x_socklen_t* addrlen)
         req.accept.addrlen = addrlen;
         req.accept.client_fd = -1;
         net_err_t err = exmsg_func_exec(socket_accept_req_in, &req);
+        if (err == NET_ERR_NEED_WAIT && nonblock)
+        {
+            socket_epoll_recheck(fd);
+            errno = EAGAIN;
+            return -1;
+        }
         if (err < NET_ERR_OK)
         {
             dbug_error(DBG_MOD_SOCKET, "socket_accept_req_in accept failed");
-            return -1;
+            socket_epoll_recheck(fd);
+            return socket_fail(err);
         }
         if (req.accept.client_fd >= 0)
         {
+            socket_epoll_recheck(fd);
             return req.accept.client_fd;
         }
         if (req.wait && err == NET_ERR_NEED_WAIT)
         {
-            sock_wait_enter(req.wait, req.wait_timeout);
+            err = sock_wait_enter(req.wait, req.wait_timeout);
+            if (err < NET_ERR_OK)
+            {
+                socket_epoll_recheck(fd);
+                return socket_fail(err);
+            }
+        }
+        else
+        {
+            socket_epoll_recheck(fd);
+            errno = EAGAIN;
+            return -1;
         }
     }
 }
@@ -194,12 +335,14 @@ int x_connect(const int fd, struct x_sockaddr* addr, const x_socklen_t addrlen)
     if (fd < 0 || addr == NULL || addrlen != sizeof(struct x_sockaddr))
     {
         dbug_error(DBG_MOD_SOCKET, "connect param err");
+        errno = EINVAL;
         return -1;
     }
 
     if (addr->sa_family != AF_INET)
     {
         dbug_error(DBG_MOD_SOCKET, "family err");
+        errno = EINVAL;
         return -1;
     }
 
@@ -209,15 +352,27 @@ int x_connect(const int fd, struct x_sockaddr* addr, const x_socklen_t addrlen)
     req.conn.addr = addr;
     req.conn.addrlen = addrlen;
 
+    const int nonblock = socket_is_nonblock(fd);
     net_err_t err = exmsg_func_exec(socket_connect_req_in, &req);
+    if (err == NET_ERR_NEED_WAIT && nonblock)
+    {
+        errno = EINPROGRESS;
+        return -1;
+    }
     if (err < NET_ERR_OK)
     {
-        return -1;
+        return socket_fail(err);
     }
     if (req.wait && err == NET_ERR_NEED_WAIT)
     {
-        sock_wait_enter(req.wait, req.wait_timeout);
+        err = sock_wait_enter(req.wait, req.wait_timeout);
+        if (err < NET_ERR_OK)
+        {
+            socket_epoll_recheck(fd);
+            return socket_fail(err);
+        }
     }
+    socket_epoll_recheck(fd);
     return 0;
 }
 
@@ -225,9 +380,11 @@ ssize_t x_send(const int fd, const void* buf, size_t len, const int flags)
 {
     if (buf == NULL || len == 0)
     {
+        errno = EINVAL;
         return -1;
     }
 
+    const int nonblock = socket_is_nonblock(fd);
     uint8_t* send_buf = (uint8_t*)buf;
     ssize_t total_sent = 0;
     while (len > 0)
@@ -237,19 +394,47 @@ ssize_t x_send(const int fd, const void* buf, size_t len, const int flags)
         req.data.buf = send_buf;
         req.data.len = len;
         req.data.flags = flags;
+        req.data.transferred_len = 0;
         req.wait = NULL;
         req.wait_timeout = 0;
 
         net_err_t err = exmsg_func_exec(socket_send_req_in, &req);
+        if (err == NET_ERR_NEED_WAIT && nonblock)
+        {
+            socket_epoll_recheck(fd);
+            if (total_sent > 0)
+            {
+                return total_sent;
+            }
+            errno = EAGAIN;
+            return -1;
+        }
         if (err < NET_ERR_OK)
         {
             dbug_error(DBG_MOD_SOCKET, "socket_send_req_in sendto failed");
-            return -1;
+            socket_epoll_recheck(fd);
+            return total_sent > 0 ? total_sent : socket_fail(err);
         }
 
-        if (req.wait && (err = sock_wait_enter(req.wait, req.wait_timeout)) < NET_ERR_OK)
+        if (req.wait)
         {
-            dbug_error(DBG_MOD_SOCKET, "socket_send: wait failed, err=%d", err);
+            err = sock_wait_enter(req.wait, req.wait_timeout);
+            if (err < NET_ERR_OK)
+            {
+                dbug_error(DBG_MOD_SOCKET, "socket_send: wait failed, err=%d", err);
+                socket_epoll_recheck(fd);
+                return total_sent > 0 ? total_sent : socket_fail(err);
+            }
+        }
+
+        if (req.data.transferred_len <= 0)
+        {
+            socket_epoll_recheck(fd);
+            if (total_sent > 0)
+            {
+                return total_sent;
+            }
+            errno = EAGAIN;
             return -1;
         }
 
@@ -257,6 +442,7 @@ ssize_t x_send(const int fd, const void* buf, size_t len, const int flags)
         send_buf += req.data.transferred_len;
         total_sent += req.data.transferred_len;
     }
+    socket_epoll_recheck(fd);
     return total_sent;
 }
 
@@ -264,9 +450,11 @@ ssize_t x_recv(const int fd, void* buf, const size_t len, const int flags)
 {
     if (buf == NULL || len == 0)
     {
+        errno = EINVAL;
         return -1;
     }
 
+    const int nonblock = socket_is_nonblock(fd);
     while (true)
     {
         sock_req_t req;
@@ -281,28 +469,45 @@ ssize_t x_recv(const int fd, void* buf, const size_t len, const int flags)
         net_err_t err = exmsg_func_exec(socket_recv_req_in, &req);
         if (err == NET_ERR_CLOSE)
         {
+            socket_epoll_recheck(fd);
             return 0; // 连接已关闭，返回0表示EOF
+        }
+        if (err == NET_ERR_NEED_WAIT && nonblock)
+        {
+            socket_epoll_recheck(fd);
+            errno = EAGAIN;
+            return -1;
         }
         if (err < NET_ERR_OK)
         {
             dbug_error(DBG_MOD_SOCKET, "socket_recv_req_in recvfrom failed");
-            return -1;
+            socket_epoll_recheck(fd);
+            return socket_fail(err);
         }
         if (req.data.transferred_len > 0)
         {
+            socket_epoll_recheck(fd);
             return req.data.transferred_len;
         }
 
-        // 等待数据到达
+        if (req.wait == NULL)
+        {
+            socket_epoll_recheck(fd);
+            errno = EAGAIN;
+            return -1;
+        }
+
         err = sock_wait_enter(req.wait, req.wait_timeout);
         if (err == NET_ERR_CLOSE)
         {
+            socket_epoll_recheck(fd);
             return 0; // 连接已关闭，返回0表示EOF
         }
         if (err < NET_ERR_OK)
         {
             dbug_error(DBG_MOD_SOCKET, "socket_recv: wait failed, err=%d", err);
-            return err;
+            socket_epoll_recheck(fd);
+            return socket_fail(err);
         }
     }
 }
@@ -319,6 +524,17 @@ ssize_t x_write(const int fd, const void* buf, const size_t len)
 
 int x_close(const int fd)
 {
+    const x_fd_type_t fd_type = sock_fd_type(fd);
+    if (fd_type == X_FD_TYPE_EPOLL)
+    {
+        return x_epoll_close(fd);
+    }
+    if (fd_type != X_FD_TYPE_SOCKET)
+    {
+        errno = EBADF;
+        return -1;
+    }
+
     sock_req_t req;
     req.fd = fd;
     req.wait = NULL;
@@ -327,13 +543,21 @@ int x_close(const int fd)
     net_err_t err = exmsg_func_exec(socket_close_req_in, &req);
     if (err < NET_ERR_OK)
     {
-        return -1;
+        return socket_fail(err);
     }
     if (req.wait && err == NET_ERR_NEED_WAIT)
     {
-        sock_wait_enter(req.wait, req.wait_timeout);
+        err = sock_wait_enter(req.wait, req.wait_timeout);
+        if (err < NET_ERR_OK && err != NET_ERR_CLOSE)
+        {
+            return socket_fail(err);
+        }
         // 销毁socket资源
-        exmsg_func_exec(socket_destroy_req_in, &req);
+        err = exmsg_func_exec(socket_destroy_req_in, &req);
+        if (err < NET_ERR_OK)
+        {
+            return socket_fail(err);
+        }
     }
     return 0;
 }
@@ -342,6 +566,7 @@ int x_setsockopt(const int fd, const int level, int opt_name, const void* opt_va
 {
     if (opt_val == NULL || opt_len == 0)
     {
+        errno = EINVAL;
         return -1;
     }
     sock_req_t req;
@@ -356,9 +581,9 @@ int x_setsockopt(const int fd, const int level, int opt_name, const void* opt_va
     net_err_t err = exmsg_func_exec(socket_setsockopt_req_in, &req);
     if (err != NET_ERR_OK)
     {
-        return -1;
+        return socket_fail(err);
     }
-    return req.fd;
+    return 0;
 }
 
 int x_getaddrinfo(const char* node, const char* service, const struct x_addrinfo* hints, struct x_addrinfo** res)

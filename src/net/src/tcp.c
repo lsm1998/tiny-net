@@ -423,6 +423,50 @@ static net_err_t tcp_recv(sock_t* sock, uint8_t* buf, const size_t len, const in
     }
 }
 
+static uint32_t tcp_poll(sock_t* sock)
+{
+    tcp_t* tcp = (tcp_t*)sock;
+    uint32_t events = 0;
+
+    switch (tcp->state)
+    {
+    case TCP_STATE_LISTEN:
+        if (tcp_has_pending_conn(tcp))
+        {
+            events |= X_POLLIN;
+        }
+        break;
+    case TCP_STATE_CLOSE:
+    case TCP_STATE_TIME_WAIT:
+        events |= X_POLLHUP;
+        break;
+    case TCP_STATE_SYN_SENT:
+    case TCP_STATE_SYN_RECEIVED:
+        break;
+    default:
+        if (tcp_buf_count(&tcp->recv.buf) > 0 || tcp->flags.fin_in)
+        {
+            events |= X_POLLIN;
+        }
+        if ((tcp->state == TCP_STATE_ESTABLISHED || tcp->state == TCP_STATE_CLOSE_WAIT) &&
+            tcp_buf_available(&tcp->send.buf) > 0)
+        {
+            events |= X_POLLOUT;
+        }
+        if (tcp->flags.fin_in || tcp->state == TCP_STATE_LAST_ACK || tcp->state == TCP_STATE_CLOSING)
+        {
+            events |= X_POLLHUP;
+        }
+        break;
+    }
+
+    if (sock->err < NET_ERR_OK && sock->err != NET_ERR_CLOSE)
+    {
+        events |= X_POLLERR;
+    }
+    return events;
+}
+
 static tcp_t* tcp_get_free(const bool wait)
 {
     tcp_t* tcp = mblock_alloc(&tcp_mblock, wait ? 0 : -1);
@@ -518,6 +562,7 @@ static tcp_t* tcp_alloc(const bool wait, const int family, const int protocol)
         .listen = tcp_listen,
         .accept = tcp_accept,
         .destroy = tcp_destroy,
+        .poll = tcp_poll,
     };
 
     net_err_t err = sock_init(&tcp->base, family, protocol, &tcp_ops);

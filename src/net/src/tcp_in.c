@@ -15,6 +15,18 @@ static void tcp_seg_init(tcp_seg_t* seg, const ipaddr_t* remote_ip, const ipaddr
     seg->seq_len = seg->data_len + seg->header->f_syn + seg->header->f_fin;
 }
 
+static bool tcp_seg_is_keepalive_probe(const tcp_t* tcp, const tcp_seg_t* seg)
+{
+    const tcp_header_t* header = seg->header;
+    return header->f_ack &&
+        !header->f_syn &&
+        !header->f_fin &&
+        !header->f_rst &&
+        TCP_SEQ_LT(seg->seq, tcp->recv.next_seq) &&
+        ((tcp->recv.next_seq - seg->seq) == 1) &&
+        (seg->seq_len <= 1);
+}
+
 static bool tcp_seq_acceptable(const tcp_t* tcp, const tcp_seg_t* seg)
 {
     int rcv_wnd = tcp_recv_window_size(tcp);
@@ -125,8 +137,17 @@ net_err_t tcp_input(pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_
     {
         if (!tcp_seq_acceptable(tcp, &seg))
         {
-            dbug_error(DBG_MOD_TCP, "tcp_input: unacceptable seq, recv_next=%u, seg_seq=%u, seg_len=%u",
-                       tcp->recv.next_seq, seg.seq, seg.seq_len);
+            if (!tcp_seg_is_keepalive_probe(tcp, &seg))
+            {
+                dbug_warn(DBG_MOD_TCP, "tcp_input: unacceptable seq, recv_next=%u, seg_seq=%u, seg_len=%u",
+                          tcp->recv.next_seq, seg.seq, seg.seq_len);
+            }
+
+            // RFC 793
+            if (!header->f_rst)
+            {
+                tcp_send_ack(tcp, &seg);
+            }
             goto seg_drop;
         }
     }

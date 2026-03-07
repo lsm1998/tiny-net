@@ -127,6 +127,21 @@ static net_err_t raw_close(sock_t* sock)
     return NET_ERR_OK;
 }
 
+static uint32_t raw_poll(sock_t* sock)
+{
+    raw_t* raw = (raw_t*)sock;
+    uint32_t events = X_POLLOUT;
+    if (nlist_count(&raw->recv_list) > 0)
+    {
+        events |= X_POLLIN;
+    }
+    if (sock->err < NET_ERR_OK)
+    {
+        events |= X_POLLERR;
+    }
+    return events;
+}
+
 sock_t* raw_create(const int family, const int protocol)
 {
     static const sock_ops_t raw_ops = {
@@ -138,6 +153,7 @@ sock_t* raw_create(const int family, const int protocol)
         .send = sock_send,
         .recv = sock_recv,
         .bind = sock_bind,
+        .poll = raw_poll,
     };
     raw_t* raw = mblock_alloc(&raw_mblock, -1);
     if (raw == NULL)

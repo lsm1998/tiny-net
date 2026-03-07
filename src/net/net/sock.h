@@ -3,6 +3,7 @@
 
 #include "exmsg.h"
 #include "net_err.h"
+#include "sock_poll.h"
 
 typedef int x_socklen_t;
 
@@ -11,6 +12,8 @@ struct sock_t;
 struct x_sockaddr;
 
 struct sock_req_t;
+
+struct x_epoll;
 
 #define SOCK_WAIT_READ (1<<0)
 #define SOCK_WAIT_WRITE (1<<1)
@@ -52,6 +55,7 @@ typedef struct sock_ops_t
     void (*destroy)(struct sock_t* sock);
     net_err_t (*listen)(struct sock_t* sock, int backlog);
     net_err_t (*accept)(struct sock_t* sock, struct x_sockaddr* addr, x_socklen_t* addrlen, struct sock_t** new_sock);
+    uint32_t (*poll)(struct sock_t* sock);
 } sock_ops_t;
 
 typedef struct sock_t
@@ -73,18 +77,26 @@ typedef struct sock_t
     sock_wait_t* recv_wait;
     sock_wait_t* send_wait;
     sock_wait_t* conn_wait;
+    nlist_t epoll_list;
     nlist_node_t node;
 } sock_t;
 
+typedef enum x_fd_type_t
+{
+    X_FD_TYPE_NONE = 0,
+    X_FD_TYPE_SOCKET,
+    X_FD_TYPE_EPOLL,
+} x_fd_type_t;
+
 typedef struct x_socket_t
 {
-    enum
+    x_fd_type_t type; // 资源类型：socket或epoll
+    union
     {
-        SOCK_STATE_FREE = 0,
-        SOCK_STATE_USED,
-    } state;
-
-    sock_t* sock;
+        sock_t* sock;
+        struct x_epoll* epoll;
+        void* ptr;
+    };
 } x_socket_t;
 
 typedef struct sock_create_t
@@ -193,5 +205,19 @@ net_err_t sock_recv(sock_t* sock, uint8_t* buf, size_t len, int flags, ssize_t* 
 net_err_t sock_bind(sock_t* sock, const struct x_sockaddr* addr, x_socklen_t addrlen);
 
 void sock_free(const sock_t* sock);
+
+x_fd_type_t sock_fd_type(int fd);
+
+int sock_fd_alloc_socket(sock_t* sock);
+
+int sock_fd_alloc_epoll(struct x_epoll* epoll);
+
+sock_t* sock_fd_get_socket(int fd);
+
+struct x_epoll* sock_fd_get_epoll(int fd);
+
+void sock_fd_release(int fd);
+
+int sock_fd_poll_events(int fd, uint32_t* events);
 
 #endif //TINY_NET_SOCK_H

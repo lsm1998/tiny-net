@@ -1,21 +1,29 @@
+#include <errno.h>
 #include <stdio.h>
+#include <string.h>
 #include "net_api.h"
-#include "epoll.h"
+#include "select.h"
 #include "common.h"
 #include "dbug_module.h"
 
 #define PORT 9999
-#define MAX_EVENTS 1024
 #define BUFFER_SIZE 1024
 
-// 设置非阻塞
-int set_nonblocking(const int fd)
+static int set_nonblocking(const int fd)
 {
     int opt_val = 1;
     return setsockopt(fd, SOL_SOCKET, SO_NONBLOCK, &opt_val, sizeof(opt_val));
 }
 
-int main()
+static void update_max_fd(const fd_set* master_set, int* max_fd)
+{
+    while (*max_fd >= 0 && !FD_ISSET(*max_fd, master_set))
+    {
+        (*max_fd)--;
+    }
+}
+
+int main(void)
 {
     dbug_module_enable_only(DBG_MOD_TCP);
     if (tiny_net_init() != NET_ERR_OK)
@@ -24,20 +32,23 @@ int main()
         return 1;
     }
 
-    struct sockaddr_in server_addr, client_addr;
-    socklen_t client_len = sizeof(client_addr);
-
-    // 创建 socket
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0)
     {
         perror("socket");
-        exit(1);
+        return 1;
     }
 
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (set_nonblocking(listen_fd) < 0)
+    {
+        perror("set_nonblocking listen_fd");
+        close(listen_fd);
+        return 1;
+    }
 
+    struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
@@ -46,76 +57,78 @@ int main()
     if (bind(listen_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
     {
         perror("bind");
-        exit(1);
+        close(listen_fd);
+        return 1;
     }
 
     if (listen(listen_fd, 128) < 0)
     {
         perror("listen");
-        exit(1);
+        close(listen_fd);
+        return 1;
     }
 
-    set_nonblocking(listen_fd);
+    fd_set master_set;
+    FD_ZERO(&master_set);
+    FD_SET(listen_fd, &master_set);
+    int max_fd = listen_fd;
 
-    // 创建 epoll
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0)
-    {
-        perror("epoll_create1");
-        exit(1);
-    }
-
-    struct epoll_event ev, events[MAX_EVENTS];
-
-    // 注册监听 socket
-    ev.events = EPOLLIN;
-    ev.data.fd = listen_fd;
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev);
-
-    printf("epoll server listening on port %d...\n", PORT);
+    printf("select server listening on port %d...\n", PORT);
 
     while (1)
     {
-        int n_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-        if (n_fds < 0)
+        fd_set read_set = master_set;
+        int ready = select(max_fd + 1, &read_set, NULL, NULL, NULL);
+        if (ready < 0)
         {
-            perror("epoll_wait");
+            perror("select");
             break;
         }
 
-        for (int i = 0; i < n_fds; i++)
+        for (int fd = 0; fd <= max_fd && ready > 0; ++fd)
         {
-            int fd = events[i].data.fd;
+            if (!FD_ISSET(fd, &read_set))
+            {
+                continue;
+            }
+            ready--;
 
-            // 新连接
             if (fd == listen_fd)
             {
+                struct sockaddr_in client_addr;
+                socklen_t client_len = sizeof(client_addr);
+
                 while (1)
                 {
-                    int conn_fd = accept(listen_fd,
-                                         (struct sockaddr*)&client_addr,
-                                         &client_len);
-
+                    int conn_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &client_len);
                     if (conn_fd < 0)
                     {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
                             break;
+                        }
                         perror("accept");
                         break;
                     }
 
-                    set_nonblocking(conn_fd);
+                    if (set_nonblocking(conn_fd) < 0)
+                    {
+                        perror("set_nonblocking conn_fd");
+                        close(conn_fd);
+                        continue;
+                    }
 
                     printf("New client: %s:%d\n",
                            inet_ntoa(client_addr.sin_addr),
                            ntohs(client_addr.sin_port));
 
-                    ev.events = EPOLLIN;
-                    ev.data.fd = conn_fd;
-                    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, conn_fd, &ev);
+                    FD_SET(conn_fd, &master_set);
+                    if (conn_fd > max_fd)
+                    {
+                        max_fd = conn_fd;
+                    }
                 }
             }
-            // 客户端数据
             else
             {
                 char buffer[BUFFER_SIZE];
@@ -123,25 +136,34 @@ int main()
                 while (1)
                 {
                     int n = read(fd, buffer, sizeof(buffer));
-
                     if (n > 0)
                     {
-                        write(fd, buffer, n); // echo
+                        write(fd, buffer, n);
                     }
                     else if (n == 0)
                     {
                         printf("Client disconnected\n");
                         close(fd);
-                        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+                        FD_CLR(fd, &master_set);
+                        if (fd == max_fd)
+                        {
+                            update_max_fd(&master_set, &max_fd);
+                        }
                         break;
                     }
                     else
                     {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
                             break;
+                        }
                         perror("read");
                         close(fd);
-                        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+                        FD_CLR(fd, &master_set);
+                        if (fd == max_fd)
+                        {
+                            update_max_fd(&master_set, &max_fd);
+                        }
                         break;
                     }
                 }
@@ -150,6 +172,5 @@ int main()
     }
 
     close(listen_fd);
-    close(epoll_fd);
     return 0;
 }

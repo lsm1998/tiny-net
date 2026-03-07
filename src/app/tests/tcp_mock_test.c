@@ -15,6 +15,8 @@
 #include "tool.h"
 #include "dbug_module.h"
 #include "timer.h"
+#include "netif.h"
+#include "ipv4.h"
 
 /* ============================== 测试框架 ============================== */
 
@@ -38,8 +40,35 @@ static int fail_count = 0;
 // 本地: 192.168.1.1:80  远端: 192.168.1.100:12345
 static const uint8_t LOCAL_IP_BUF[] = {192, 168, 1, 1};
 static const uint8_t REMOTE_IP_BUF[] = {192, 168, 1, 100};
+static const uint8_t LOCAL_MASK_BUF[] = {255, 255, 255, 0};
 static const uint16_t LOCAL_PORT = 80;
 static const uint16_t REMOTE_PORT = 12345;
+
+static net_err_t test_netif_open(netif_t* netif, void* data)
+{
+    (void)data;
+    netif->type = NETIF_TYPE_LOOPBACK;
+    netif->mtu = 1500;
+    return NET_ERR_OK;
+}
+
+static net_err_t test_netif_close(netif_t* netif)
+{
+    (void)netif;
+    return NET_ERR_OK;
+}
+
+static net_err_t test_netif_linkoutput(netif_t* netif)
+{
+    (void)netif;
+    return NET_ERR_OK;
+}
+
+static netif_open_options_t test_netif_ops = {
+    .open = test_netif_open,
+    .close = test_netif_close,
+    .linkoutput = test_netif_linkoutput,
+};
 
 /* ============================== 辅助函数 ============================== */
 
@@ -100,6 +129,47 @@ static tcp_t* create_test_tcp(void)
     sock->remote_port = REMOTE_PORT;
 
     return tcp;
+}
+
+static netif_t* create_output_capture_netif(void)
+{
+    netif_t* netif = netif_open("test0", &test_netif_ops, NULL);
+    if (netif == NULL)
+    {
+        printf("  ERROR: netif_open failed\n");
+        return NULL;
+    }
+
+    ipaddr_t ipaddr;
+    ipaddr_t netmask;
+    ipaddr_from_buf(&ipaddr, LOCAL_IP_BUF);
+    ipaddr_from_buf(&netmask, LOCAL_MASK_BUF);
+
+    if (netif_set_addr(netif, &ipaddr, &netmask, NULL) != NET_ERR_OK)
+    {
+        printf("  ERROR: netif_set_addr failed\n");
+        netif_close(netif);
+        return NULL;
+    }
+
+    if (netif_set_active(netif) != NET_ERR_OK)
+    {
+        printf("  ERROR: netif_set_active failed\n");
+        netif_close(netif);
+        return NULL;
+    }
+
+    return netif;
+}
+
+static void destroy_output_capture_netif(netif_t* netif)
+{
+    if (netif == NULL)
+    {
+        return;
+    }
+    netif_set_inactive(netif);
+    netif_close(netif);
 }
 
 /**
@@ -593,7 +663,62 @@ static void test_keepalive_reset_interrupts_probe(void)
 }
 
 /**
- * 测试13: tcp_kill_all_timer 清理
+ * 测试13: 收到对端 keepalive 探测时应回 ACK
+ */
+static void test_keepalive_probe_ack(void)
+{
+    TEST_START("test_keepalive_probe_ack: keepalive 探测回 ACK");
+
+    netif_t* netif = create_output_capture_netif();
+    TEST_ASSERT(netif != NULL, "测试 netif 创建成功");
+    if (!netif) return;
+
+    tcp_t* tcp = create_test_tcp();
+    if (!tcp)
+    {
+        destroy_output_capture_netif(netif);
+        return;
+    }
+    setup_established(tcp, 1000, 2000);
+
+    pktbuf_t* keepalive_pkt = build_tcp_packet(
+        REMOTE_PORT, LOCAL_PORT,
+        2000, 1001,
+        0, 1, 0, 0,
+        NULL, 0);
+
+    feed_packet(keepalive_pkt);
+
+    TEST_ASSERT(tcp->state == TCP_STATE_ESTABLISHED, "收到 keepalive 后仍 ESTABLISHED");
+    TEST_ASSERT(tcp->recv.next_seq == 2001, "keepalive 不推进 recv.next_seq");
+
+    pktbuf_t* ack_pkt = netif_get_out(netif, 0);
+    TEST_ASSERT(ack_pkt != NULL, "收到 keepalive 后会回 ACK");
+    if (ack_pkt)
+    {
+        if (pktbuf_set_cont(ack_pkt, (int)sizeof(ipv4_header_t) + (int)sizeof(tcp_header_t)) == NET_ERR_OK)
+        {
+            tcp_header_t* ack_hdr = (tcp_header_t*)((uint8_t*)pktbuf_data(ack_pkt) + sizeof(ipv4_header_t));
+            TEST_ASSERT(x_ntohs(ack_hdr->src_port) == LOCAL_PORT, "ACK 源端口正确");
+            TEST_ASSERT(x_ntohs(ack_hdr->dest_port) == REMOTE_PORT, "ACK 目的端口正确");
+            TEST_ASSERT(x_ntohl(ack_hdr->seq_num) == 1001, "ACK seq = SND.NXT");
+            TEST_ASSERT(x_ntohl(ack_hdr->ack_num) == 2001, "ACK ack = RCV.NXT");
+            TEST_ASSERT(ack_hdr->f_ack == 1, "ACK 标志置位");
+            TEST_ASSERT(ack_hdr->f_syn == 0 && ack_hdr->f_fin == 0 && ack_hdr->f_rst == 0, "仅回 ACK");
+        }
+        else
+        {
+            TEST_ASSERT(0, "ACK 包头连续可读");
+        }
+        pktbuf_free(ack_pkt);
+    }
+
+    tcp_free(tcp);
+    destroy_output_capture_netif(netif);
+}
+
+/**
+ * 测试14: tcp_kill_all_timer 清理
  */
 static void test_kill_all_timer(void)
 {
@@ -627,6 +752,8 @@ int main(void)
     // 最小初始化
     pktbuf_init();
     net_timer_init();
+    netif_init();
+    ipv4_init();
     tcp_init();
 
     printf("TCP Mock Test\n");
@@ -645,6 +772,7 @@ int main(void)
     test_keepalive_timeout_probe();
     test_keepalive_timeout_abort();
     test_keepalive_reset_interrupts_probe();
+    test_keepalive_probe_ack();
     test_kill_all_timer();
 
     // 汇总

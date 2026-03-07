@@ -40,6 +40,9 @@
 #undef SO_RCVBUF
 #define SO_RCVBUF          4
 
+#undef SO_REUSEADDR
+#define SO_REUSEADDR       5
+
 #undef SO_KEEPALIVE
 #define SO_KEEPALIVE       8
 
@@ -124,6 +127,18 @@ struct x_addrinfo
 #define in_addr x_in_addr
 #define socketaddr x_socketaddr
 #define sockaddr x_sockaddr
+#undef fd_set
+#define fd_set x_fd_set
+#undef FD_SETSIZE
+#define FD_SETSIZE NET_FD_MAX
+#undef FD_ZERO
+#define FD_ZERO(set) x_fd_zero_bits(set)
+#undef FD_SET
+#define FD_SET(fd, set) x_fd_set_bits(fd, set)
+#undef FD_CLR
+#define FD_CLR(fd, set) x_fd_clr_bits(fd, set)
+#undef FD_ISSET
+#define FD_ISSET(fd, set) x_fd_isset_bits(fd, set)
 
 int x_socket(int family, int type, int protocol);
 

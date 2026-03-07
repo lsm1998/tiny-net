@@ -201,6 +201,21 @@ static net_err_t udp_close(sock_t* sock)
     return NET_ERR_OK;
 }
 
+static uint32_t udp_poll(sock_t* sock)
+{
+    udp_t* udp = (udp_t*)sock;
+    uint32_t events = X_POLLOUT;
+    if (nlist_count(&udp->recv_list) > 0)
+    {
+        events |= X_POLLIN;
+    }
+    if (sock->err < NET_ERR_OK)
+    {
+        events |= X_POLLERR;
+    }
+    return events;
+}
+
 static net_err_t udp_bind(sock_t* sock, const struct x_sockaddr* addr, x_socklen_t addr_len)
 {
     if (sock->local_port != 0)
@@ -249,6 +264,7 @@ sock_t* udp_create(const int family, const int protocol)
         .send = sock_send,
         .recv = sock_recv,
         .bind = udp_bind,
+        .poll = udp_poll,
     };
     udp_t* udp = mblock_alloc(&udp_mblock, -1);
     if (udp == NULL)

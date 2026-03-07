@@ -83,6 +83,12 @@
 // 套接字最大文件描述符数量
 #define SOCKET_MAX_FD (RAW_MAX_NR + UDP_MAX_NR + TCP_MAX_NR)
 
+// epoll实例最大数量
+#define EPOLL_MAX_INSTANCES 16
+
+// 统一文件描述符数量
+#define NET_FD_MAX (SOCKET_MAX_FD + EPOLL_MAX_INSTANCES)
+
 // 原始套接字接收队列长度
 #define RAW_RECV_QUEUE_LEN 128
 

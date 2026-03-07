@@ -1,58 +1,196 @@
 #include "sock.h"
 #include "dbug.h"
+#include "epoll.h"
 #include "raw.h"
 #include "udp.h"
 #include "sys_plat.h"
 #include "socket.h"
+#include "select.h"
 #include "tool.h"
 #include "tcp.h"
 
-static x_socket_t socket_tbl[SOCKET_MAX_FD];
+static x_socket_t fd_tbl[NET_FD_MAX];
+static sys_mutex_t fd_tbl_lock = SYS_MUTEX_INVALID;
 
-static int socket_get_fd(const x_socket_t* sock)
+static void fd_lock(void)
 {
-    return (int)(sock - socket_tbl);
+    if (fd_tbl_lock != SYS_MUTEX_INVALID)
+    {
+        sys_mutex_lock(fd_tbl_lock);
+    }
 }
 
-static x_socket_t* socket_get(const int fd)
+static void fd_unlock(void)
 {
-    if (fd < 0 || fd >= SOCKET_MAX_FD)
+    if (fd_tbl_lock != SYS_MUTEX_INVALID)
+    {
+        sys_mutex_unlock(fd_tbl_lock);
+    }
+}
+
+static int fd_get_index(const x_socket_t* entry)
+{
+    return (int)(entry - fd_tbl);
+}
+
+static x_socket_t* fd_get(const int fd)
+{
+    if (fd < 0 || fd >= NET_FD_MAX)
     {
         return NULL;
     }
-    x_socket_t* sock = &socket_tbl[fd];
-    if (sock->state != SOCK_STATE_USED)
+    x_socket_t* entry = &fd_tbl[fd];
+    if (entry->type == X_FD_TYPE_NONE)
     {
         return NULL;
     }
-    return sock;
+    return entry;
 }
 
-static x_socket_t* socket_alloc()
+static x_socket_t* fd_alloc(const x_fd_type_t type, void* ptr)
 {
-    for (int i = 0; i < SOCKET_MAX_FD; ++i)
+    for (int i = 0; i < NET_FD_MAX; ++i)
     {
-        if (socket_tbl[i].state == SOCK_STATE_FREE)
+        if (fd_tbl[i].type == X_FD_TYPE_NONE)
         {
-            socket_tbl[i].state = SOCK_STATE_USED;
-            return &socket_tbl[i];
+            fd_tbl[i].type = type;
+            fd_tbl[i].ptr = ptr;
+            return &fd_tbl[i];
         }
     }
     return NULL;
 }
 
-static void socket_free(x_socket_t* sock)
+static void fd_release_entry(x_socket_t* entry)
 {
-    if (sock)
+    if (entry)
     {
-        sock->state = SOCK_STATE_FREE;
+        entry->type = X_FD_TYPE_NONE;
+        entry->ptr = NULL;
     }
 }
 
 net_err_t socket_init(void)
 {
-    plat_memset(socket_tbl, 0, sizeof(socket_tbl));
+    plat_memset(fd_tbl, 0, sizeof(fd_tbl));
+    if (fd_tbl_lock == SYS_MUTEX_INVALID)
+    {
+        fd_tbl_lock = sys_mutex_create();
+        if (fd_tbl_lock == SYS_MUTEX_INVALID)
+        {
+            return NET_ERR_SYS;
+        }
+    }
+    net_err_t err = x_select_init();
+    if (err != NET_ERR_OK)
+    {
+        sys_mutex_free(fd_tbl_lock);
+        fd_tbl_lock = SYS_MUTEX_INVALID;
+        return err;
+    }
     return NET_ERR_OK;
+}
+
+x_fd_type_t sock_fd_type(const int fd)
+{
+    fd_lock();
+    x_socket_t* entry = fd_get(fd);
+    const x_fd_type_t type = entry ? entry->type : X_FD_TYPE_NONE;
+    fd_unlock();
+    return type;
+}
+
+int sock_fd_alloc_socket(sock_t* sock)
+{
+    fd_lock();
+    x_socket_t* entry = fd_alloc(X_FD_TYPE_SOCKET, sock);
+    const int fd = entry ? fd_get_index(entry) : -1;
+    fd_unlock();
+    return fd;
+}
+
+int sock_fd_alloc_epoll(struct x_epoll* epoll)
+{
+    fd_lock();
+    x_socket_t* entry = fd_alloc(X_FD_TYPE_EPOLL, epoll);
+    const int fd = entry ? fd_get_index(entry) : -1;
+    fd_unlock();
+    return fd;
+}
+
+sock_t* sock_fd_get_socket(const int fd)
+{
+    fd_lock();
+    x_socket_t* entry = fd_get(fd);
+    sock_t* sock = (entry && entry->type == X_FD_TYPE_SOCKET) ? entry->sock : NULL;
+    fd_unlock();
+    return sock;
+}
+
+struct x_epoll* sock_fd_get_epoll(const int fd)
+{
+    fd_lock();
+    x_socket_t* entry = fd_get(fd);
+    struct x_epoll* epoll = (entry && entry->type == X_FD_TYPE_EPOLL) ? entry->epoll : NULL;
+    fd_unlock();
+    return epoll;
+}
+
+void sock_fd_release(const int fd)
+{
+    fd_lock();
+    x_socket_t* entry = fd_get(fd);
+    if (entry)
+    {
+        fd_release_entry(entry);
+    }
+    fd_unlock();
+    x_select_wakeup();
+}
+
+int sock_fd_poll_events(const int fd, uint32_t* events)
+{
+    if (events == NULL)
+    {
+        return -1;
+    }
+
+    x_fd_type_t type = sock_fd_type(fd);
+    switch (type)
+    {
+    case X_FD_TYPE_SOCKET:
+        {
+            sock_t* sock = sock_fd_get_socket(fd);
+            if (sock == NULL || sock->ops == NULL || sock->ops->poll == NULL)
+            {
+                return -1;
+            }
+            *events = sock->ops->poll(sock);
+            return 0;
+        }
+    case X_FD_TYPE_EPOLL:
+        *events = x_epoll_poll_events(fd);
+        return 0;
+    case X_FD_TYPE_NONE:
+    default:
+        return -1;
+    }
+}
+
+static void sock_dispose(sock_t* sock)
+{
+    if (sock == NULL || sock->ops == NULL)
+    {
+        return;
+    }
+    if (sock->ops->destroy)
+    {
+        sock->ops->destroy(sock);
+    }
+    else if (sock->ops->close)
+    {
+        sock->ops->close(sock);
+    }
 }
 
 net_err_t socket_create_req_in(const func_msg_t* msg)
@@ -68,36 +206,33 @@ net_err_t socket_create_req_in(const func_msg_t* msg)
     };
 
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_alloc();
-    if (s == NULL)
-    {
-        return NET_ERR_MEM;
-    }
 
     if (req->create.type < 0 || req->create.type >= (int)(sizeof(sock_tbl) / sizeof(sock_tbl[0])))
     {
-        socket_free(s);
         return NET_ERR_PROTOCOL;
     }
 
     struct sock_info_t info = sock_tbl[req->create.type];
     if (info.create == NULL)
     {
-        socket_free(s);
         return NET_ERR_PROTOCOL;
     }
     if (req->create.protocol == 0)
     {
         req->create.protocol = info.protocol;
     }
-    s->sock = info.create(req->create.family, req->create.protocol);
-    if (s->sock == NULL)
+    sock_t* sock = info.create(req->create.family, req->create.protocol);
+    if (sock == NULL)
     {
-        socket_free(s);
         return NET_ERR_MEM;
     }
 
-    req->fd = socket_get_fd(s);
+    req->fd = sock_fd_alloc_socket(sock);
+    if (req->fd < 0)
+    {
+        sock_dispose(sock);
+        return NET_ERR_MEM;
+    }
     return NET_ERR_OK;
 }
 
@@ -105,47 +240,47 @@ net_err_t socket_sendto_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
     sock_data_t* data = &req->data;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
-    if (s->sock->ops->sendto == NULL)
+    if (sock->ops->sendto == NULL)
     {
         return NET_ERR_INVALID_STATE;
     }
-    net_err_t err = s->sock->ops->sendto(s->sock, data->buf, data->len, data->flags, data->addr, *data->addrlen,
-                                         &data->transferred_len);
-    if (err == NET_ERR_NEED_WAIT && s->sock->send_wait)
+    net_err_t err = sock->ops->sendto(sock, data->buf, data->len, data->flags, data->addr, *data->addrlen,
+                                      &data->transferred_len);
+    if (err == NET_ERR_NEED_WAIT && sock->send_wait)
     {
-        sock_wait_add(s->sock->send_wait, s->sock->send_timeout, req);
+        sock_wait_add(sock->send_wait, sock->send_timeout, req);
     }
     if (err < NET_ERR_OK)
     {
         dbug_error(DBG_MOD_SOCK, "socket sendto failed, err=%d", err);
         return err;
     }
-    return NET_ERR_OK;
+    return err;
 }
 
 net_err_t socket_recvfrom_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
     sock_data_t* data = &req->data;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
-    if (s->sock->ops->recvfrom == NULL)
+    if (sock->ops->recvfrom == NULL)
     {
         return NET_ERR_INVALID_STATE;
     }
-    net_err_t err = s->sock->ops->recvfrom(s->sock, data->buf, data->len, data->flags, data->addr, data->addrlen,
-                                           &data->transferred_len);
-    if (err == NET_ERR_NEED_WAIT && s->sock->recv_wait)
+    net_err_t err = sock->ops->recvfrom(sock, data->buf, data->len, data->flags, data->addr, data->addrlen,
+                                        &data->transferred_len);
+    if (err == NET_ERR_NEED_WAIT && sock->recv_wait)
     {
-        sock_wait_add(s->sock->recv_wait, s->sock->recv_timeout, req);
+        sock_wait_add(sock->recv_wait, sock->recv_timeout, req);
     }
 
     if (err < NET_ERR_OK)
@@ -153,41 +288,42 @@ net_err_t socket_recvfrom_req_in(const func_msg_t* msg)
         dbug_error(DBG_MOD_SOCK, "socket recvfrom failed, err=%d", err);
         return err;
     }
-    return NET_ERR_OK;
+    return err;
 }
 
 net_err_t socket_setsockopt_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
-    return s->sock->ops->setopt(s->sock, req->opt.level, req->opt.opt_name, req->opt.opt_val, req->opt.opt_len);
+    return sock->ops->setopt(sock, req->opt.level, req->opt.opt_name, req->opt.opt_val, req->opt.opt_len);
 }
 
 net_err_t socket_close_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
-    if (s->sock->ops->close == NULL)
+    if (sock->ops->close == NULL)
     {
         return NET_ERR_UNIMPLEMENTED;
     }
-    net_err_t err = s->sock->ops->close(s->sock);
+    x_epoll_sock_close(sock, req->fd);
+    net_err_t err = sock->ops->close(sock);
 
-    if (err == NET_ERR_NEED_WAIT && s->sock->conn_wait)
+    if (err == NET_ERR_NEED_WAIT && sock->conn_wait)
     {
-        sock_wait_add(s->sock->conn_wait, NET_CLOSE_WAIT_TIMEOUT * 1000, req);
+        sock_wait_add(sock->conn_wait, NET_CLOSE_WAIT_TIMEOUT * 1000, req);
     }
     else
     {
-        socket_free(s);
+        sock_fd_release(req->fd);
     }
     return err;
 }
@@ -195,22 +331,22 @@ net_err_t socket_close_req_in(const func_msg_t* msg)
 net_err_t socket_connect_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
 
     sock_conn_t* conn = &req->conn;
-    if (s->sock->ops->connect == NULL)
+    if (sock->ops->connect == NULL)
     {
         return NET_ERR_UNIMPLEMENTED;
     }
-    net_err_t err = s->sock->ops->connect(s->sock, conn->addr, conn->addrlen);
+    net_err_t err = sock->ops->connect(sock, conn->addr, conn->addrlen);
 
-    if (err == NET_ERR_NEED_WAIT && s->sock->conn_wait)
+    if (err == NET_ERR_NEED_WAIT && sock->conn_wait)
     {
-        sock_wait_add(s->sock->conn_wait, s->sock->recv_timeout, req);
+        sock_wait_add(sock->conn_wait, sock->recv_timeout, req);
     }
     return err;
 }
@@ -218,60 +354,64 @@ net_err_t socket_connect_req_in(const func_msg_t* msg)
 net_err_t socket_bind_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
 
     sock_bind_t* bind = &req->bind;
-    if (s->sock->ops->bind == NULL)
+    if (sock->ops->bind == NULL)
     {
         return NET_ERR_UNIMPLEMENTED;
     }
-    return s->sock->ops->bind(s->sock, bind->addr, bind->addrlen);
+    return sock->ops->bind(sock, bind->addr, bind->addrlen);
 }
 
 net_err_t socket_send_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
-    if (req->conn.addr == NULL)
+    if (sock->remote_port == 0 && ipaddr_is_any(&sock->remote_ip))
     {
         return NET_ERR_ADDR_UNSET;
     }
-    if (s->sock->ops->send == NULL)
+    if (sock->ops->send == NULL)
     {
         return NET_ERR_UNIMPLEMENTED;
     }
-    return s->sock->ops->send(s->sock, req->data.buf, req->data.len, req->data.flags, &req->data.transferred_len);
+    net_err_t err = sock->ops->send(sock, req->data.buf, req->data.len, req->data.flags, &req->data.transferred_len);
+    if (err == NET_ERR_NEED_WAIT && sock->send_wait)
+    {
+        sock_wait_add(sock->send_wait, sock->send_timeout, req);
+    }
+    return err;
 }
 
 net_err_t socket_recv_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
-    if (req->conn.addr == NULL)
+    if (sock->remote_port == 0 && ipaddr_is_any(&sock->remote_ip))
     {
         return NET_ERR_ADDR_UNSET;
     }
-    if (s->sock->ops->recv == NULL)
+    if (sock->ops->recv == NULL)
     {
         return NET_ERR_UNIMPLEMENTED;
     }
-    net_err_t err = s->sock->ops->recv(s->sock, req->data.buf, req->data.len, req->data.flags,
-                                       &req->data.transferred_len);
-    if (err == NET_ERR_NEED_WAIT && s->sock->recv_wait)
+    net_err_t err = sock->ops->recv(sock, req->data.buf, req->data.len, req->data.flags, &req->data.transferred_len);
+    if (err == NET_ERR_NEED_WAIT && sock->recv_wait)
     {
-        sock_wait_add(s->sock->recv_wait, s->sock->recv_timeout, req);
+        sock_wait_add(sock->recv_wait, sock->recv_timeout, req);
     }
     return err;
 }
@@ -279,8 +419,8 @@ net_err_t socket_recv_req_in(const func_msg_t* msg)
 net_err_t socket_listen_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
@@ -289,50 +429,46 @@ net_err_t socket_listen_req_in(const func_msg_t* msg)
     {
         return NET_ERR_INVALID_PARAM;
     }
-    if (s->sock->ops->listen == NULL)
+    if (sock->ops->listen == NULL)
     {
         return NET_ERR_UNIMPLEMENTED;
     }
-    return s->sock->ops->listen(s->sock, listen->backlog);
+    return sock->ops->listen(sock, listen->backlog);
 }
 
 net_err_t socket_accept_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
 
     sock_accept_t* accept = &req->accept;
     sock_t* client = NULL;
-    if (s->sock->ops->accept == NULL)
+    if (sock->ops->accept == NULL)
     {
         return NET_ERR_UNIMPLEMENTED;
     }
-    net_err_t err = s->sock->ops->accept(s->sock, accept->addr, accept->addrlen, &client);
+    net_err_t err = sock->ops->accept(sock, accept->addr, accept->addrlen, &client);
     if (err < NET_ERR_OK)
     {
         dbug_error(DBG_MOD_SOCK, "socket accept failed, err=%d", err);
     }
-    else if (err == NET_ERR_NEED_WAIT && s->sock->conn_wait)
+    else if (err == NET_ERR_NEED_WAIT && sock->conn_wait)
     {
-        sock_wait_add(s->sock->conn_wait, s->sock->recv_timeout, req);
+        sock_wait_add(sock->conn_wait, sock->recv_timeout, req);
     }
     else if (err == NET_ERR_OK && client)
     {
-        x_socket_t* sock = socket_alloc();
-        if (sock == NULL)
+        const int client_fd = sock_fd_alloc_socket(client);
+        if (client_fd < 0)
         {
-            if (s->sock->ops->close)
-            {
-                s->sock->ops->close(client);
-            }
+            sock_dispose(client);
             return NET_ERR_MEM;
         }
-        sock->sock = client;
-        accept->client_fd = socket_get_fd(sock);
+        accept->client_fd = client_fd;
     }
     return err;
 }
@@ -340,16 +476,16 @@ net_err_t socket_accept_req_in(const func_msg_t* msg)
 net_err_t socket_destroy_req_in(const func_msg_t* msg)
 {
     sock_req_t* req = msg->arg;
-    x_socket_t* s = socket_get(req->fd);
-    if (s == NULL)
+    sock_t* sock = sock_fd_get_socket(req->fd);
+    if (sock == NULL)
     {
         return NET_ERR_INVALID_PARAM;
     }
-    if (s->sock->ops->destroy)
+    if (sock->ops->destroy)
     {
-        s->sock->ops->destroy(s->sock);
+        sock->ops->destroy(sock);
     }
-    socket_free(s);
+    sock_fd_release(req->fd);
     return NET_ERR_OK;
 }
 
@@ -370,6 +506,7 @@ net_err_t sock_init(sock_t* sock, const int family, const int protocol, const so
     sock->send_wait = NULL;
     sock->recv_wait = NULL;
     sock->conn_wait = NULL;
+    nlist_init(&sock->epoll_list);
     return NET_ERR_OK;
 }
 
@@ -423,6 +560,7 @@ void sock_wait_leave(sock_wait_t* wait, const net_err_t err)
 
 void sock_wakeup(const sock_t* sock, const int type, const net_err_t err)
 {
+    ((sock_t*)sock)->err = err;
     if (type & SOCK_WAIT_READ && sock->recv_wait)
     {
         sock_wait_leave(sock->recv_wait, err);
@@ -435,6 +573,8 @@ void sock_wakeup(const sock_t* sock, const int type, const net_err_t err)
     {
         sock_wait_leave(sock->conn_wait, err);
     }
+    x_epoll_sock_wakeup(sock);
+    x_select_wakeup();
 }
 
 void sock_free(const sock_t* sock)
@@ -505,6 +645,8 @@ net_err_t sock_setopt(sock_t* sock, int level, int opt_name, const void* opt_val
             return NET_ERR_INVALID_PARAM;
         }
         sock->recv_buf_size = rcvbuf;
+        break;
+    case SO_REUSEADDR:
         break;
     case SO_NONBLOCK:
         if (opt_len != sizeof(int))
