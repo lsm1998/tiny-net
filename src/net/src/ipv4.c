@@ -395,8 +395,10 @@ static net_err_t ip_fragment_insert(ip_fragment_t* fragment, pktbuf_t* buf, cons
 }
 
 // 处理分片包输入
-static net_err_t ip_fragment_input(netif_t* netif, pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_ip)
+static net_err_t ip_fragment_input(netif_t* netif, pktbuf_t* buf, const ipaddr_t* src_ip, const ipaddr_t* dest_ip,
+                                   bool* buf_consumed)
 {
+    *buf_consumed = false;
     ipv4_pkt_t* ipv4_pkt = (ipv4_pkt_t*)pktbuf_data(buf);
     ip_fragment_t* frag = fragment_find(src_ip, ipv4_pkt->header.id);
     if (frag == NULL)
@@ -416,6 +418,8 @@ static net_err_t ip_fragment_input(netif_t* netif, pktbuf_t* buf, const ipaddr_t
         dbug_warn(DBG_MOD_IPV4, "ip_fragment_input: ip_fragment_insert failed, err=%d", err);
         return err;
     }
+
+    *buf_consumed = true;
 
     // 是否所有分片到达
     if (fragment_is_all_arrived(frag))
@@ -545,10 +549,12 @@ net_err_t ipv4_input(netif_t* netif, pktbuf_t* buf)
         return NET_ERR_TARGET_ADDR_MATCH;
     }
 
+    bool buf_consumed = false;
+
     // 是否为分片包
     if (pkt->header.frag_offset || pkt->header.more_frags)
     {
-        err = ip_fragment_input(netif, buf, &src_ip, &dest_ip);
+        err = ip_fragment_input(netif, buf, &src_ip, &dest_ip, &buf_consumed);
     }
     else
     {
@@ -558,7 +564,10 @@ net_err_t ipv4_input(netif_t* netif, pktbuf_t* buf)
     if (err != NET_ERR_OK)
     {
         dbug_warn(DBG_MOD_IPV4, "ipv4_input: ip_normal_input failed, err=%d", err);
-        pktbuf_free(buf);
+        if (buf_consumed)
+        {
+            return NET_ERR_OK;
+        }
         return err;
     }
 
@@ -655,8 +664,11 @@ static net_err_t ipv4_output_fragment(netif_t* netif, const ipaddr_t* dest_ip, p
         offset += frag_data_size;
     }
 
-    // 释放原始buf
-    pktbuf_free(buf);
+    // 成功时由分片发送路径消费原始buf；失败时仍交给上层按错误路径回收。
+    if (err == NET_ERR_OK)
+    {
+        pktbuf_free(buf);
+    }
     return err;
 }
 

@@ -68,7 +68,6 @@ static net_err_t ether_input(netif_t* netif, pktbuf_t* buf)
     if (err != NET_ERR_OK)
     {
         dbug_warn(DBG_MOD_ETHER, "ether_input: pktbuf_set_cont failed, err=%d", err);
-        pktbuf_free(buf);
         return err;
     }
 
@@ -78,7 +77,6 @@ static net_err_t ether_input(netif_t* netif, pktbuf_t* buf)
     if (err != NET_ERR_OK)
     {
         dbug_warn(DBG_MOD_ETHER, "ether_input: invalid ether frame, err=%d", err);
-        pktbuf_free(buf);
         return err;
     }
 
@@ -91,7 +89,6 @@ static net_err_t ether_input(netif_t* netif, pktbuf_t* buf)
         if ((err = pktbuf_remove_header(buf, sizeof(ether_header_t))) != NET_ERR_OK)
         {
             dbug_warn(DBG_MOD_ETHER, "ether_input: pktbuf_remove_header failed, err=%d", err);
-            pktbuf_free(buf);
             return err;
         }
         return arp_in(netif, buf);
@@ -103,7 +100,6 @@ static net_err_t ether_input(netif_t* netif, pktbuf_t* buf)
         if ((err = pktbuf_remove_header(buf, sizeof(ether_header_t))) != NET_ERR_OK)
         {
             dbug_warn(DBG_MOD_ETHER, "ether_input: pktbuf_remove_header failed, err=%d", err);
-            pktbuf_free(buf);
             return err;
         }
         return ipv4_input(netif, buf);

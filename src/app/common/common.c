@@ -109,12 +109,6 @@ net_err_t tiny_net_init(void)
     // 以太网卡初始化
     ether_init();
 
-    // 虚拟网卡初始化
-    netdev_init();
-
-    // 工作线程
-    exmsg_start();
-
     // Socket模块初始化
     socket_init();
 
@@ -132,6 +126,12 @@ net_err_t tiny_net_init(void)
 
     // 回环网卡初始化
     loop_init();
+
+    // 虚拟网卡初始化
+    netdev_init();
+
+    // 消息模块启动
+    exmsg_start();
 
     return NET_ERR_OK;
 }

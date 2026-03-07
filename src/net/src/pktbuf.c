@@ -27,7 +27,9 @@ static void pktblock_free(pktblk_t* block)
 {
     if (block)
     {
+        nlocker_lock(&locker);
         mblock_free(&block_list, block);
+        nlocker_unlock(&locker);
     }
 }
 
@@ -221,7 +223,9 @@ static void pktbuf_insert_blk_list(pktbuf_t* buf, pktblk_t* block,
 
 pktbuf_t* pktbuf_alloc(const int size)
 {
+    nlocker_lock(&locker);
     pktbuf_t* buf = mblock_alloc(&pktbuf_list, -1);
+    nlocker_unlock(&locker);
     if (buf == NULL)
     {
         dbug_error(DBG_MOD_PKTBUF, "pktbuf alloc failed");
@@ -246,7 +250,9 @@ pktbuf_t* pktbuf_alloc(const int size)
         if (block == NULL)
         {
             dbug_error(DBG_MOD_PKTBUF, "pktblock alloc list failed");
+            nlocker_lock(&locker);
             mblock_free(&pktbuf_list, buf);
+            nlocker_unlock(&locker);
             return NULL;
         }
         pktbuf_insert_blk_list(buf, block, is_head);
@@ -268,7 +274,6 @@ void pktbuf_free(pktbuf_t* pktbuf)
     }
 
     // free 块链表
-    // pktblock_free_list(pktbuf_first_blk(pktbuf));
     pktblk_t* curr = pktbuf_first_blk(pktbuf);
     while (curr)
     {
@@ -291,6 +296,20 @@ net_err_t pktbuf_add_header(pktbuf_t* pktbuf, int size, const bool is_cont)
     }
 
     pktblk_t* block = pktbuf_first_blk(pktbuf);
+    if (block == NULL)
+    {
+        pktblk_t* new_blk = pktblock_alloc_list(size, true);
+        if (new_blk == NULL)
+        {
+            dbug_error(DBG_MOD_PKTBUF, "pktblock alloc failed for empty pktbuf");
+            return NET_ERR_MEM;
+        }
+
+        pktbuf_insert_blk_list(pktbuf, new_blk, true);
+        pktbuf_reset_access(pktbuf);
+        display_check_buf(pktbuf);
+        return NET_ERR_OK;
+    }
 
     // 获取剩余空间
     const int remain_size = (int)(block->data - block->payload);
@@ -299,6 +318,7 @@ net_err_t pktbuf_add_header(pktbuf_t* pktbuf, int size, const bool is_cont)
         block->size += size;
         block->data -= size;
         pktbuf->total_size += size;
+        pktbuf_reset_access(pktbuf);
         display_check_buf(pktbuf);
         return NET_ERR_OK;
     }
@@ -332,6 +352,7 @@ net_err_t pktbuf_add_header(pktbuf_t* pktbuf, int size, const bool is_cont)
     }
 
     pktbuf_insert_blk_list(pktbuf, new_blk, true);
+    pktbuf_reset_access(pktbuf);
     display_check_buf(pktbuf);
     return NET_ERR_OK;
 }
@@ -347,6 +368,12 @@ net_err_t pktbuf_remove_header(pktbuf_t* pktbuf, int size)
     {
         dbug_error(DBG_MOD_PKTBUF, "pktbuf remove header failed,buf is empty");
         return NET_ERR_SYS;
+    }
+    if (size > (int)pktbuf->total_size)
+    {
+        dbug_error(DBG_MOD_PKTBUF, "pktbuf remove header size too large,size=%d,total=%d", size,
+                   pktbuf->total_size);
+        return NET_ERR_INVALID_PARAM;
     }
 
     while (size > 0 && block != NULL)
@@ -366,6 +393,7 @@ net_err_t pktbuf_remove_header(pktbuf_t* pktbuf, int size)
         size -= curr_size;
         block = next;
     }
+    pktbuf_reset_access(pktbuf);
     display_check_buf(pktbuf);
     return NET_ERR_OK;
 }
@@ -390,6 +418,7 @@ net_err_t pktbuf_resize(pktbuf_t* pktbuf, const int new_size)
         }
         pktbuf_insert_blk_list(pktbuf, blk, false);
         pktbuf->total_size = new_size;
+        pktbuf_reset_access(pktbuf);
         return NET_ERR_OK;
     }
     if (new_size == 0)
@@ -397,6 +426,7 @@ net_err_t pktbuf_resize(pktbuf_t* pktbuf, const int new_size)
         pktblock_free_list(pktbuf_first_blk(pktbuf));
         nlist_init(&pktbuf->blk_list);
         pktbuf->total_size = 0;
+        pktbuf_reset_access(pktbuf);
         return NET_ERR_OK;
     }
     if (pktbuf->total_size < (uint32_t)new_size) // 扩展
@@ -457,6 +487,7 @@ net_err_t pktbuf_resize(pktbuf_t* pktbuf, const int new_size)
         pktbuf->total_size = new_size;
     }
 
+    pktbuf_reset_access(pktbuf);
     display_check_buf(pktbuf);
     return NET_ERR_OK;
 }
@@ -478,6 +509,7 @@ net_err_t join_pktbuf(pktbuf_t* dst, pktbuf_t* src)
     // 释放 src
     pktbuf_free(src);
 
+    pktbuf_reset_access(dst);
     display_check_buf(dst);
     return NET_ERR_OK;
 }
@@ -536,6 +568,7 @@ net_err_t pktbuf_set_cont(pktbuf_t* pktbuf, const int size)
             curr_blk = next_blk;
         }
     }
+    pktbuf_reset_access(pktbuf);
     display_check_buf(pktbuf);
     return NET_ERR_OK;
 }
