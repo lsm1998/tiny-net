@@ -40,6 +40,7 @@ static int socket_err_to_errno(const net_err_t err)
     case NET_ERR_ADDR:
         return EHOSTUNREACH;
     case NET_ERR_REST:
+    case NET_ERR_RESET:
         return ECONNRESET;
     case NET_ERR_CLOSE:
         return EPIPE;

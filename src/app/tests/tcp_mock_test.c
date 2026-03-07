@@ -199,6 +199,43 @@ static net_err_t feed_packet(pktbuf_t* pkt)
     return tcp_input(pkt, &src_ip, &dst_ip);
 }
 
+static tcp_header_t* get_out_tcp_header(pktbuf_t* pkt)
+{
+    if (pkt == NULL)
+    {
+        return NULL;
+    }
+
+    if (pktbuf_set_cont(pkt, (int)sizeof(ipv4_header_t) + (int)sizeof(tcp_header_t)) != NET_ERR_OK)
+    {
+        return NULL;
+    }
+
+    return (tcp_header_t*)((uint8_t*)pktbuf_data(pkt) + sizeof(ipv4_header_t));
+}
+
+static int read_out_tcp_payload(pktbuf_t* pkt, uint8_t* payload, int size)
+{
+    tcp_header_t* hdr = get_out_tcp_header(pkt);
+    if (hdr == NULL)
+    {
+        return -1;
+    }
+
+    int offset = (int)sizeof(ipv4_header_t) + (int)tcp_header_size(hdr);
+    int payload_len = pktbuf_total(pkt) - offset;
+    if (payload_len > size)
+    {
+        payload_len = size;
+    }
+
+    if (payload_len > 0 && pktbuf_peek(pkt, payload, payload_len, offset) != NET_ERR_OK)
+    {
+        return -1;
+    }
+    return payload_len;
+}
+
 /* ============================== 测试用例 ============================== */
 
 /**
@@ -718,7 +755,154 @@ static void test_keepalive_probe_ack(void)
 }
 
 /**
- * 测试14: tcp_kill_all_timer 清理
+ * 测试14: 正常发送应只发送未发送的数据尾部
+ */
+static void test_transmit_sends_only_unsent_tail(void)
+{
+    TEST_START("test_transmit_sends_only_unsent_tail: 仅发送未发送尾部");
+
+    netif_t* netif = create_output_capture_netif();
+    TEST_ASSERT(netif != NULL, "测试 netif 创建成功");
+    if (!netif) return;
+
+    tcp_t* tcp = create_test_tcp();
+    if (!tcp)
+    {
+        destroy_output_capture_netif(netif);
+        return;
+    }
+    setup_established(tcp, 1000, 2000);
+    tcp->mss = 4;
+
+    tcp_write_send_buf(tcp, (const uint8_t*)"ABCDEFGH", 8);
+    tcp->send.next_seq = tcp->send.un_ack_seq + 4;
+
+    net_err_t err = tcp_transmit(tcp);
+    TEST_ASSERT(err == NET_ERR_OK, "tcp_transmit 成功");
+
+    pktbuf_t* out = netif_get_out(netif, -1);
+    TEST_ASSERT(out != NULL, "发送队列中有数据包");
+    if (out)
+    {
+        tcp_header_t* hdr = get_out_tcp_header(out);
+        TEST_ASSERT(hdr != NULL, "可读取 TCP 头");
+        if (hdr)
+        {
+            TEST_ASSERT(x_ntohl(hdr->seq_num) == 1005, "seq 指向未发送数据起点");
+            TEST_ASSERT(hdr->f_ack == 1, "ACK 标志正确");
+        }
+
+        uint8_t payload[8] = {0};
+        int payload_len = read_out_tcp_payload(out, payload, sizeof(payload));
+        TEST_ASSERT(payload_len == 4, "发送 4 字节 MSS 数据");
+        TEST_ASSERT(memcmp(payload, "EFGH", 4) == 0, "仅发送未发送尾部 EFGH");
+        pktbuf_free(out);
+    }
+
+    TEST_ASSERT(tcp->send.next_seq == 1009, "next_seq 前进到 1009");
+
+    tcp_free(tcp);
+    destroy_output_capture_netif(netif);
+}
+
+/**
+ * 测试15: 重传应只发送未确认的数据前部
+ */
+static void test_retransmit_sends_only_unacked_head(void)
+{
+    TEST_START("test_retransmit_sends_only_unacked_head: 仅重传未确认前部");
+
+    netif_t* netif = create_output_capture_netif();
+    TEST_ASSERT(netif != NULL, "测试 netif 创建成功");
+    if (!netif) return;
+
+    tcp_t* tcp = create_test_tcp();
+    if (!tcp)
+    {
+        destroy_output_capture_netif(netif);
+        return;
+    }
+    setup_established(tcp, 1000, 2000);
+    tcp->mss = 4;
+
+    tcp_write_send_buf(tcp, (const uint8_t*)"ABCDEFGH", 8);
+    tcp->send.next_seq = tcp->send.un_ack_seq + 4;
+
+    tcp->send.ostate = TCP_OSTATE_RETRANS;
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
+
+    pktbuf_t* out = netif_get_out(netif, -1);
+    TEST_ASSERT(out != NULL, "重传队列中有数据包");
+    if (out)
+    {
+        tcp_header_t* hdr = get_out_tcp_header(out);
+        TEST_ASSERT(hdr != NULL, "可读取 TCP 头");
+        if (hdr)
+        {
+            TEST_ASSERT(x_ntohl(hdr->seq_num) == 1001, "重传从 un_ack_seq 开始");
+        }
+
+        uint8_t payload[8] = {0};
+        int payload_len = read_out_tcp_payload(out, payload, sizeof(payload));
+        TEST_ASSERT(payload_len == 4, "重传 4 字节未确认数据");
+        TEST_ASSERT(memcmp(payload, "ABCD", 4) == 0, "仅重传未确认前部 ABCD");
+        pktbuf_free(out);
+    }
+
+    TEST_ASSERT(tcp->send.next_seq == 1005, "重传不推进 next_seq");
+
+    tcp_kill_all_timer(tcp);
+    tcp_free(tcp);
+    destroy_output_capture_netif(netif);
+}
+
+/**
+ * 测试16: 空闲连接收到纯 ACK 不应启动重传定时器
+ */
+static void test_idle_ack_does_not_start_retransmit(void)
+{
+    TEST_START("test_idle_ack_does_not_start_retransmit: 纯 ACK 不启动重传");
+
+    netif_t* netif = create_output_capture_netif();
+    TEST_ASSERT(netif != NULL, "测试 netif 创建成功");
+    if (!netif) return;
+
+    tcp_t* tcp = create_test_tcp();
+    if (!tcp)
+    {
+        destroy_output_capture_netif(netif);
+        return;
+    }
+    setup_established(tcp, 1000, 2000);
+
+    pktbuf_t* ack_pkt = build_tcp_packet(
+        REMOTE_PORT, LOCAL_PORT,
+        2001, 1001,
+        0, 1, 0, 0,
+        NULL, 0);
+
+    feed_packet(ack_pkt);
+
+    TEST_ASSERT(tcp->state == TCP_STATE_ESTABLISHED, "纯 ACK 后仍保持 ESTABLISHED");
+    TEST_ASSERT(tcp->send.ostate == TCP_OSTATE_IDLE, "纯 ACK 不切换到 SENDING");
+
+    pktbuf_t* out = netif_get_out(netif, -1);
+    TEST_ASSERT(out == NULL, "纯 ACK 不产生额外发送");
+    if (out)
+    {
+        pktbuf_free(out);
+    }
+
+    net_timer_check_mo(TCP_INIT_RTO * 2);
+    TEST_ASSERT(tcp->state == TCP_STATE_ESTABLISHED, "快进 RTO 后连接不会被误超时关闭");
+    TEST_ASSERT(tcp->send.ostate == TCP_OSTATE_IDLE, "快进 RTO 后仍保持 IDLE");
+
+    tcp_free(tcp);
+    destroy_output_capture_netif(netif);
+}
+
+/**
+ * 测试17: tcp_kill_all_timer 清理
  */
 static void test_kill_all_timer(void)
 {
@@ -773,6 +957,9 @@ int main(void)
     test_keepalive_timeout_abort();
     test_keepalive_reset_interrupts_probe();
     test_keepalive_probe_ack();
+    test_transmit_sends_only_unsent_tail();
+    test_retransmit_sends_only_unacked_head();
+    test_idle_ack_does_not_start_retransmit();
     test_kill_all_timer();
 
     // 汇总

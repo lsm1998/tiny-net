@@ -553,6 +553,7 @@ static tcp_t* tcp_alloc(const bool wait, const int family, const int protocol)
     tcp->conn.keep_interval = TCP_KEEP_INTERVAL;
     tcp->conn.keep_count = TCP_KEEP_COUNT;
     tcp->send.ostate = TCP_OSTATE_IDLE;
+    tcp->send.rto = TCP_INIT_RTO;
     tcp->send.retrans_max = TCP_INIT_RETRIES;
 
     static const sock_ops_t tcp_ops = {

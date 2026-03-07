@@ -45,17 +45,88 @@ static int copy_send_data(const tcp_t* tcp, pktbuf_t* buf, int data_offset, int 
     return data_len;
 }
 
+static int get_unacked_data_len(const tcp_t* tcp)
+{
+    int unacked = (int)tcp->send.next_seq - (int)tcp->send.un_ack_seq;
+    if (unacked <= 0)
+    {
+        return 0;
+    }
+
+    if (tcp->flags.syn_out && unacked > 0)
+    {
+        unacked--;
+    }
+
+    if (tcp->flags.fin_out && tcp_buf_count(&tcp->send.buf) == 0 && unacked > 0)
+    {
+        unacked--;
+    }
+
+    int buf_count = tcp_buf_count(&tcp->send.buf);
+    if (unacked > buf_count)
+    {
+        unacked = buf_count;
+    }
+    return unacked < 0 ? 0 : unacked;
+}
+
+static int get_unsent_data_len(const tcp_t* tcp)
+{
+    int unsent = tcp_buf_count(&tcp->send.buf) - get_unacked_data_len(tcp);
+    return unsent > 0 ? unsent : 0;
+}
+
+static bool has_new_syn(const tcp_t* tcp)
+{
+    return tcp->flags.syn_out && (tcp->send.next_seq == tcp->send.un_ack_seq);
+}
+
+static bool has_new_fin(const tcp_t* tcp)
+{
+    return tcp->flags.fin_out
+           && (tcp_buf_count(&tcp->send.buf) == 0)
+           && (tcp->send.next_seq == tcp->send.un_ack_seq);
+}
+
+static bool has_new_send(const tcp_t* tcp)
+{
+    return has_new_syn(tcp) || has_new_fin(tcp) || (get_unsent_data_len(tcp) > 0);
+}
+
+static bool has_unacked_send(const tcp_t* tcp)
+{
+    return TCP_SEQ_LT(tcp->send.un_ack_seq, tcp->send.next_seq);
+}
+
+static void backoff_rto(tcp_t* tcp)
+{
+    if (tcp->send.rto <= 0)
+    {
+        tcp->send.rto = TCP_INIT_RTO;
+    }
+
+    if (tcp->send.rto < TCP_MAX_RTO)
+    {
+        tcp->send.rto <<= 1;
+        if (tcp->send.rto > TCP_MAX_RTO)
+        {
+            tcp->send.rto = TCP_MAX_RTO;
+        }
+    }
+}
+
 static void get_send_info(const tcp_t* tcp, bool retrans, int* offset, int* dlen)
 {
     if (retrans)
     {
         *offset = 0;
-        *dlen = tcp_buf_count(&tcp->send.buf) - *offset;
+        *dlen = get_unacked_data_len(tcp);
     }
     else
     {
-        *offset = tcp->flags.syn_out ? 0 : (int)tcp->send.next_seq - (int)tcp->send.un_ack_seq;
-        *dlen = tcp_buf_count(&tcp->send.buf) - *offset;
+        *offset = get_unacked_data_len(tcp);
+        *dlen = get_unsent_data_len(tcp);
     }
 
     // 非零窗口, 首先不能超过MSS
@@ -128,7 +199,7 @@ static void write_tcp_option(const tcp_t* tcp, pktbuf_t* buf)
 net_err_t tcp_transmit(tcp_t* tcp)
 {
     int data_len, data_offset;
-    get_send_info(tcp, true, &data_offset, &data_len);
+    get_send_info(tcp, false, &data_offset, &data_len);
     if (data_len < 0)
     {
         return NET_ERR_OK;
@@ -336,7 +407,7 @@ net_err_t tcp_retransmit(tcp_t* tcp)
 {
     // 注意要考虑FIN和SYN，且不能把需要重发的算进去，只算此次新的发的数据
     int dlen, doff;
-    get_send_info(tcp, false, &doff, &dlen);
+    get_send_info(tcp, true, &doff, &dlen);
     if (dlen < 0)
     {
         return NET_ERR_OK;
@@ -400,10 +471,11 @@ net_err_t tcp_retransmit(tcp_t* tcp)
     // 计算此次重发，有多少新数据被发送，将其统计到snd.nxt中
     // 不必考虑SYN，重发时SYN肯定是之前已经发过了，不能计算在内
     // 也不必考虑FIN，因为之前的transmit，FIN肯定也是已经发过不了，所以不计算在内
-    uint32_t diff = tcp->send.un_ack_seq + dlen - tcp->send.next_seq;
-    tcp->send.next_seq += diff > 0 ? diff : 0;
-
-    // 发送出去
+    uint32_t retrans_end = tcp->send.un_ack_seq + hdr->f_syn + hdr->f_fin + dlen;
+    if (TCP_SEQ_LT(tcp->send.next_seq, retrans_end))
+    {
+        tcp->send.next_seq = retrans_end;
+    }
     dbug_info(DBG_MOD_TCP, "tcp send: seq %u, ack %u, dlen %d, seqlen: %d, %s",
               hdr->seq_num, hdr->ack_num, dlen, seq_len, tcp_ostate_name(tcp->send.ostate));
     return send_out(hdr, buf, &tcp->base.remote_ip, &tcp->base.local_ip);
@@ -431,7 +503,7 @@ static void tcp_out_timer_tmo(net_timer_t* timer, void* arg)
 
             // 进入重发状态, 启动重传定时器。然后重传有几次渐进变化的过程
             tcp->send.retrans_count = 1;
-            tcp->send.rto <<= 1;
+            backoff_rto(tcp);
             tcp->send.ostate = TCP_OSTATE_RETRANS;
             net_timer_add(&tcp->send.retrans_timer, tcp_ostate_name(tcp->send.ostate), tcp_out_timer_tmo, tcp,
                           tcp->send.rto, 0);
@@ -439,7 +511,7 @@ static void tcp_out_timer_tmo(net_timer_t* timer, void* arg)
         }
     case TCP_OSTATE_RETRANS:
         {
-            if ((++tcp->send.retrans_count > tcp->send.retrans_max))
+            if (++tcp->send.retrans_count > tcp->send.retrans_max)
             {
                 dbug_error(DBG_MOD_TCP, "retrans tmo err");
                 tcp_abort(tcp, NET_ERR_TIMEOUT);
@@ -454,11 +526,7 @@ static void tcp_out_timer_tmo(net_timer_t* timer, void* arg)
                 return;
             }
 
-            tcp->send.rto <<= 1;
-            if (tcp->send.rto >= TCP_INIT_RETRIES)
-            {
-                tcp->send.rto = TCP_INIT_RETRIES;
-            }
+            backoff_rto(tcp);
             net_timer_add(&tcp->send.retrans_timer, tcp_ostate_name(tcp->send.ostate), tcp_out_timer_tmo, tcp,
                           tcp->send.rto, 0);
             break;
@@ -478,6 +546,7 @@ static void tcp_set_ostate(tcp_t* tcp, const tcp_ostate_t state)
     {
     case TCP_OSTATE_IDLE:
         tcp->send.ostate = state;
+        tcp->send.retrans_count = 0;
         tcp->send.rto = TCP_INIT_RTO;
         net_timer_remove(&tcp->send.retrans_timer); // 移除定时器
         return;
@@ -499,8 +568,14 @@ static void tcp_ostate_idle_in(tcp_t* tcp, const tcp_out_event_t event)
     switch (event)
     {
     case TCP_OUT_EVENT_SEND:
-        tcp_transmit(tcp);
-        tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+        if (!has_new_send(tcp))
+        {
+            break;
+        }
+        if ((tcp_transmit(tcp) == NET_ERR_OK) && has_unacked_send(tcp))
+        {
+            tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+        }
         break;
     default:
         break;
@@ -514,12 +589,14 @@ static void tcp_ostate_sending_in(tcp_t* tcp, const tcp_out_event_t event)
     case TCP_OUT_EVENT_SEND:
         if (tcp->send.un_ack_seq == tcp->send.next_seq || tcp->flags.fin_out)
         {
-            if (tcp_buf_count(&tcp->send.buf) || tcp->flags.fin_out)
+            if (has_new_send(tcp))
             {
-                tcp_transmit(tcp);
-                tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+                if ((tcp_transmit(tcp) == NET_ERR_OK) && has_unacked_send(tcp))
+                {
+                    tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+                }
             }
-            else // 没有数据要发，进入空闲状态
+            else if (!has_unacked_send(tcp)) // 没有数据要发，进入空闲状态
             {
                 tcp_set_ostate(tcp, TCP_OSTATE_IDLE);
             }
@@ -538,13 +615,15 @@ static void tcp_ostate_retrans_in(tcp_t* tcp, const tcp_out_event_t event)
         {
             if (tcp->send.un_ack_seq == tcp->send.next_seq || tcp->flags.fin_out)
             {
-                if (tcp_buf_count(&tcp->send.buf) || tcp->flags.fin_out)
+                if (has_new_send(tcp))
                 {
                     // 发送前需要检查窗口，如果为0则进入坚持状态，否则会进入普通发送状态
-                    tcp_transmit(tcp);
-                    tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+                    if ((tcp_transmit(tcp) == NET_ERR_OK) && has_unacked_send(tcp))
+                    {
+                        tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+                    }
                 }
-                else
+                else if (!has_unacked_send(tcp))
                 {
                     tcp_set_ostate(tcp, TCP_OSTATE_IDLE);
                 }

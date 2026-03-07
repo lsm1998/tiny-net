@@ -167,8 +167,11 @@
 // IPv4地址长度
 #define IPV4_ADDR_SIZE 4
 
-// TCP初始重传超时时间，单位秒
-#define TCP_INIT_RTO 3
+// TCP初始重传超时时间，单位毫秒
+#define TCP_INIT_RTO 3000
+
+// TCP最大重传超时时间，单位毫秒
+#define TCP_MAX_RTO 60000
 
 // TCP初始重传次数
 #define TCP_INIT_RETRIES 5
