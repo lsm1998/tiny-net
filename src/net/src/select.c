@@ -117,7 +117,7 @@ void x_select_wakeup(void)
     }
 }
 
-int x_select(const int n_fds, x_fd_set* read_fds, x_fd_set* write_fds, x_fd_set* except_fds, const x_timeval* timeout)
+int x_select(const int n_fds, x_fd_set* read_fds, x_fd_set* write_fds, x_fd_set* except_fds, const timeval* timeout)
 {
     if (n_fds < 0 || n_fds > NET_FD_MAX)
     {

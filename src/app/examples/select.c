@@ -78,13 +78,16 @@ int main(void)
     while (1)
     {
         fd_set read_set = master_set;
-        int ready = select(max_fd + 1, &read_set, NULL, NULL, NULL);
+
+        timeval timeout;
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        int ready = select(max_fd + 1, &read_set, NULL, NULL, &timeout);
         if (ready < 0)
         {
             perror("select");
             break;
         }
-
         for (int fd = 0; fd <= max_fd && ready > 0; ++fd)
         {
             if (!FD_ISSET(fd, &read_set))

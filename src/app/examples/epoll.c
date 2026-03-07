@@ -76,12 +76,13 @@ int main()
 
     while (1)
     {
-        int n_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        int n_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, 2000);
         if (n_fds < 0)
         {
             perror("epoll_wait");
             break;
         }
+        printf("epoll_wait returned %d events\n", n_fds);
 
         for (int i = 0; i < n_fds; i++)
         {
