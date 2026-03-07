@@ -59,6 +59,23 @@ skip_end:
     return c <= end ? c : NULL;
 }
 
+static dns_entry_t* dns_entry_find(const char* domain)
+{
+    for (int i = 0; i < DNS_ENTRY_SIZE; i++)
+    {
+        dns_entry_t* entry = dns_entry_tbl + i;
+        if (ipaddr_is_any(&entry->ipaddr))
+        {
+            continue;
+        }
+        if (plat_strcmp(entry->domain_name, domain) == 0)
+        {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
 // 释放DNS表项，重置为初始状态
 static void dns_entry_free(dns_entry_t* entry)
 {
@@ -121,13 +138,13 @@ static void dns_entry_insert(const char* domain_name, const uint32_t ttl, const 
             break;
         }
 
-        if (oldest == (dns_entry_t*)0 || entry->ttl < oldest->ttl)
+        if (oldest == NULL || entry->ttl < oldest->ttl)
         {
             oldest = entry;
         }
     }
 
-    if (free == (dns_entry_t*)0)
+    if (free == NULL)
     {
         free = oldest;
     }
@@ -146,7 +163,7 @@ static void dns_req_fail(dns_req_t* req, const net_err_t err)
 static uint8_t* add_query_field(const char* domain_name, char* buf, const size_t size)
 {
     // 检查长度大小：包含字符串有效长，开头的.和结束的'\0'
-    if (size < (sizeof(dns_qfield_t) + plat_strlen(domain_name) + 2))
+    if (size < sizeof(dns_qfield_t) + plat_strlen(domain_name) + 2)
     {
         dbug_error(DBG_MOD_DNS, "no enough space for query: %s", domain_name);
         return NULL;
@@ -228,7 +245,7 @@ static void dns_update_timeout(net_timer_t* timer, void* arg)
         {
             continue;
         }
-        if (!entry->ttl || (--entry->ttl == 0))
+        if (!entry->ttl || --entry->ttl == 0)
         {
             dns_entry_free(entry);
         }
@@ -317,7 +334,7 @@ void dns_in()
         }
         if (header->flags.qr == 0)
         {
-            dbug_warn(DBG_MOD_DNS, "not a responsed");
+            dbug_warn(DBG_MOD_DNS, "not a response");
             goto req_failure;
         }
         // 不允许截断的消息
@@ -445,6 +462,16 @@ net_err_t dns_query_req_in(const func_msg_t* msg)
         dns_req->ipaddr = ipaddr;
         dns_req->err = NET_ERR_OK;
         return NET_ERR_OK;
+    }
+
+    // 如果已经存在，找到后复制后直接返回
+    dns_entry_t* entry = dns_entry_find(dns_req->domain);
+    if (entry)
+    {
+        // 找到已解析的项，直接返回
+        ipaddr_copy(&dns_req->ipaddr, &entry->ipaddr);
+        dns_req->err = NET_ERR_OK;
+        return dns_req->err;
     }
 
     // 是否是本地地址

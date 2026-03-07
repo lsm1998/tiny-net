@@ -569,7 +569,6 @@ void arp_update_from_ip_buf(netif_t* netif,  pktbuf_t* buf)
         return;
     }
 
-
     uint8_t src_ip[IPV4_ADDR_LEN];
     plat_memcpy(src_ip, &ip_hdr->src_addr, IPV4_ADDR_LEN);
 
