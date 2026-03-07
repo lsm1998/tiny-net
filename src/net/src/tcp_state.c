@@ -161,6 +161,7 @@ net_err_t tcp_syn_received_in(tcp_t* tcp, tcp_seg_t* seg)
     {
         sock_wakeup(&tcp->parent->base, SOCK_WAIT_CONN, NET_ERR_OK);
     }
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
     return NET_ERR_OK;
 }
 
@@ -191,7 +192,8 @@ net_err_t tcp_established_in(tcp_t* tcp, tcp_seg_t* seg)
     tcp_data_in(tcp, seg);
 
     // 有没有数据需要发送
-    tcp_transmit(tcp);
+    // tcp_transmit(tcp);
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
 
     // 是否是关闭连接的请求
     if (tcp->flags.fin_in)
@@ -242,7 +244,8 @@ net_err_t tcp_fin_wait_1_in(tcp_t* tcp, tcp_seg_t* seg)
 
     tcp_data_in(tcp, seg);
 
-    tcp_transmit(tcp);
+    // tcp_transmit(tcp);
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
 
     if (tcp->flags.fin_out == 0)
     {
@@ -287,6 +290,7 @@ net_err_t tcp_fin_wait_2_in(tcp_t* tcp, tcp_seg_t* seg)
     }
 
     tcp_data_in(tcp, seg);
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
 
     // 是否是关闭连接的请求
     if (tcp->flags.fin_in)
@@ -299,6 +303,30 @@ net_err_t tcp_fin_wait_2_in(tcp_t* tcp, tcp_seg_t* seg)
 
 net_err_t tcp_close_wait_in(tcp_t* tcp, tcp_seg_t* seg)
 {
+    tcp_header_t* tcp_hdr = seg->header;
+
+    // 是否是RST报文
+    if (tcp_hdr->f_rst)
+    {
+        dbug_warn(DBG_MOD_TCP, "%s: recv a rst", tcp_state_name(tcp->state));
+        return tcp_abort(tcp, NET_ERR_RESET);
+    }
+
+    // 是否是SYN报文
+    if (tcp_hdr->f_syn)
+    {
+        dbug_warn(DBG_MOD_TCP, "%s: recv a syn", tcp_state_name(tcp->state));
+        tcp_send_reset(seg);
+        return tcp_abort(tcp, NET_ERR_RESET);
+    }
+
+    // 处理ACK
+    if (tcp_ack_process(tcp, seg) < 0)
+    {
+        dbug_warn(DBG_MOD_TCP, "%s: dump ack %d ?", tcp_state_name(tcp->state), seg->header->ack_num);
+        return NET_ERR_STATE;
+    }
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
     return NET_ERR_OK;
 }
 
@@ -324,7 +352,8 @@ net_err_t tcp_closing_in(tcp_t* tcp, tcp_seg_t* seg)
         return err;
     }
 
-    tcp_transmit(tcp);
+    // tcp_transmit(tcp);
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
 
     if (tcp->flags.fin_out == 0)
     {

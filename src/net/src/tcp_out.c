@@ -45,15 +45,21 @@ static int copy_send_data(const tcp_t* tcp, pktbuf_t* buf, int data_offset, int 
     return data_len;
 }
 
-static void get_send_info(const tcp_t* tcp, int* data_offset, int* data_len)
+static void get_send_info(const tcp_t* tcp, bool retrans, int* offset, int* dlen)
 {
-    *data_offset = (int)tcp->send.next_seq - (int)tcp->send.un_ack_seq;
-    *data_len = tcp_buf_count(&tcp->send.buf) - *data_offset;
-
-    if (*data_len > tcp->mss)
+    if (retrans)
     {
-        *data_len = tcp->mss;
+        *offset = 0;
+        *dlen = tcp_buf_count(&tcp->send.buf) - *offset;
     }
+    else
+    {
+        *offset = tcp->flags.syn_out ? 0 : (int)tcp->send.next_seq - (int)tcp->send.un_ack_seq;
+        *dlen = tcp_buf_count(&tcp->send.buf) - *offset;
+    }
+
+    // 非零窗口, 首先不能超过MSS
+    *dlen = *dlen > tcp->mss ? tcp->mss : *dlen;
 }
 
 net_err_t tcp_send_reset(const tcp_seg_t* seg)
@@ -122,7 +128,7 @@ static void write_tcp_option(const tcp_t* tcp, pktbuf_t* buf)
 net_err_t tcp_transmit(tcp_t* tcp)
 {
     int data_len, data_offset;
-    get_send_info(tcp, &data_offset, &data_len);
+    get_send_info(tcp, true, &data_offset, &data_len);
     if (data_len < 0)
     {
         return NET_ERR_OK;
@@ -176,7 +182,8 @@ net_err_t tcp_transmit(tcp_t* tcp)
 net_err_t tcp_send_syn(tcp_t* tcp)
 {
     tcp->flags.syn_out = 1;
-    tcp_transmit(tcp);
+    // tcp_transmit(tcp);
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
     return NET_ERR_OK;
 }
 
@@ -247,7 +254,8 @@ net_err_t tcp_send_ack(tcp_t* tcp, tcp_seg_t* seg)
 net_err_t tcp_send_fin(tcp_t* tcp)
 {
     tcp->flags.fin_out = 1;
-    tcp_transmit(tcp);
+    // tcp_transmit(tcp);
+    tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
     return NET_ERR_OK;
 }
 
@@ -307,4 +315,266 @@ net_err_t tcp_send_reset_with_tcp(const tcp_t* tcp)
     out->urgent_ptr = 0;
     tcp_set_header_size(out, sizeof(tcp_header_t));
     return send_out(out, buf, &tcp->base.remote_ip, &tcp->base.local_ip);
+}
+
+const char* tcp_ostate_name(tcp_ostate_t ostate)
+{
+    switch (ostate)
+    {
+    case TCP_OSTATE_IDLE:
+        return "IDLE";
+    case TCP_OSTATE_SENDING:
+        return "SENDING";
+    case TCP_OSTATE_RETRANS:
+        return "RETRANS";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+net_err_t tcp_retransmit(tcp_t* tcp)
+{
+    // 注意要考虑FIN和SYN，且不能把需要重发的算进去，只算此次新的发的数据
+    int dlen, doff;
+    get_send_info(tcp, false, &doff, &dlen);
+    if (dlen < 0)
+    {
+        return NET_ERR_OK;
+    }
+    // 由于发送可能由应用发起，也可能是在收到ACK后发起。因此，需要检查当前是否可以发送
+    // 如果没有需要可以发送的，并且当前状态不允许发送，则直接退出
+    int seq_len = dlen;
+    if (tcp->flags.syn_out)
+    {
+        seq_len++;
+    }
+
+    if (tcp->flags.fin_out)
+    {
+        seq_len++;
+    }
+
+    if (seq_len == 0)
+    {
+        return NET_ERR_OK;
+    }
+
+    // 分配一个TCP包，暂不考虑选项区域和头部区域
+    pktbuf_t* buf = pktbuf_alloc(sizeof(tcp_header_t));
+    if (!buf)
+    {
+        dbug_error(DBG_MOD_TCP, "no buffer");
+        return NET_ERR_OK;
+    }
+
+    // 生成数据包头
+    tcp_header_t* hdr = (tcp_header_t*)pktbuf_data(buf);
+    hdr->src_port = tcp->base.local_port;
+    hdr->dest_port = tcp->base.remote_port;
+    hdr->seq_num = tcp->send.un_ack_seq; // 从una开始发送
+    hdr->ack_num = tcp->recv.next_seq;
+    hdr->flags = 0;
+    hdr->f_syn = tcp->flags.syn_out; // 发送后不清理，因为可能要重传
+    if (hdr->f_syn)
+    {
+        // syn置位，写入SYN选项, 首次连接，告诉对方自己的一些信息
+        write_tcp_option(tcp, buf);
+    }
+
+    // 整个TCP传输中，除第一次传递之外，其它都需要发送ACK
+    hdr->f_ack = tcp->flags.irs_valid;
+    hdr->window_size = (uint16_t)tcp_recv_window_size(tcp);
+    hdr->urgent_ptr = 0; // 不支持紧急数据
+    tcp_set_header_size(hdr, buf->total_size);
+
+    // 拷贝要发送的数据，从偏移量为0开始发送
+    copy_send_data(tcp, buf, doff, dlen);
+
+    // 当FIN标志位置位，且此次发送的数据为整个缓冲中所有的数据时，FIN才需要发送出去
+    // 否则，应当等所有的数据都被发送完毕时，FIN才应当被发送
+    if (tcp->flags.fin_out)
+    {
+        hdr->f_fin = (tcp_buf_count(&tcp->send.buf) == 0) ? 1 : 0;
+    }
+
+    // 计算此次重发，有多少新数据被发送，将其统计到snd.nxt中
+    // 不必考虑SYN，重发时SYN肯定是之前已经发过了，不能计算在内
+    // 也不必考虑FIN，因为之前的transmit，FIN肯定也是已经发过不了，所以不计算在内
+    uint32_t diff = tcp->send.un_ack_seq + dlen - tcp->send.next_seq;
+    tcp->send.next_seq += diff > 0 ? diff : 0;
+
+    // 发送出去
+    dbug_info(DBG_MOD_TCP, "tcp send: seq %u, ack %u, dlen %d, seqlen: %d, %s",
+              hdr->seq_num, hdr->ack_num, dlen, seq_len, tcp_ostate_name(tcp->send.ostate));
+    return send_out(hdr, buf, &tcp->base.remote_ip, &tcp->base.local_ip);
+}
+
+static void tcp_out_timer_tmo(net_timer_t* timer, void* arg)
+{
+    tcp_t* tcp = arg;
+
+    // 作为警告，方便观察
+    dbug_info(DBG_MOD_TCP, "timer tmo: %s", tcp_ostate_name(tcp->send.ostate));
+
+    // 根据状态做不同的处理
+    switch (tcp->send.ostate)
+    {
+    case TCP_OSTATE_SENDING:
+        {
+            // 发送状态超时，那么此时就应该进入重传状态, 重发所有数据
+            net_err_t err = tcp_retransmit(tcp);
+            if (err < 0)
+            {
+                dbug_error(DBG_MOD_TCP, "rexmit failed.");
+                return;
+            }
+
+            // 进入重发状态, 启动重传定时器。然后重传有几次渐进变化的过程
+            tcp->send.retrans_count = 1;
+            tcp->send.rto <<= 1;
+            tcp->send.ostate = TCP_OSTATE_RETRANS;
+            net_timer_add(&tcp->send.retrans_timer, tcp_ostate_name(tcp->send.ostate), tcp_out_timer_tmo, tcp,
+                          tcp->send.rto, 0);
+            break;
+        }
+    case TCP_OSTATE_RETRANS:
+        {
+            if ((++tcp->send.retrans_count > tcp->send.retrans_max))
+            {
+                dbug_error(DBG_MOD_TCP, "retrans tmo err");
+                tcp_abort(tcp, NET_ERR_TIMEOUT);
+                return;
+            }
+
+            // 继续重发
+            net_err_t err = tcp_retransmit(tcp);
+            if (err < 0)
+            {
+                dbug_error(DBG_MOD_TCP, "retrans failed.");
+                return;
+            }
+
+            tcp->send.rto <<= 1;
+            if (tcp->send.rto >= TCP_INIT_RETRIES)
+            {
+                tcp->send.rto = TCP_INIT_RETRIES;
+            }
+            net_timer_add(&tcp->send.retrans_timer, tcp_ostate_name(tcp->send.ostate), tcp_out_timer_tmo, tcp,
+                          tcp->send.rto, 0);
+            break;
+        }
+    default:
+        dbug_error(DBG_MOD_TCP, "tcp state error: %d", tcp->state);
+    }
+}
+
+static void tcp_set_ostate(tcp_t* tcp, const tcp_ostate_t state)
+{
+    dbug_info(DBG_MOD_TCP, "tcp_set_ostate: %s -> %s", tcp_ostate_name(tcp->send.ostate), tcp_ostate_name(state));
+    tcp->send.ostate = state;
+
+    int tmo = 0;
+    switch (state)
+    {
+    case TCP_OSTATE_IDLE:
+        tcp->send.ostate = state;
+        tcp->send.rto = TCP_INIT_RTO;
+        net_timer_remove(&tcp->send.retrans_timer); // 移除定时器
+        return;
+    case TCP_OSTATE_SENDING:
+    case TCP_OSTATE_RETRANS:
+        tmo = tcp->send.rto; // 仍然使用RTO
+        break;
+    default:
+        dbug_error(DBG_MOD_TCP, "tcp_set_ostate: invalid state %d", state);
+    }
+    tcp->send.ostate = state;
+    // 移除定时器
+    net_timer_remove(&tcp->send.retrans_timer);
+    net_timer_add(&tcp->send.retrans_timer, tcp_ostate_name(tcp->send.ostate), tcp_out_timer_tmo, tcp, tmo, 0);
+}
+
+static void tcp_ostate_idle_in(tcp_t* tcp, const tcp_out_event_t event)
+{
+    switch (event)
+    {
+    case TCP_OUT_EVENT_SEND:
+        tcp_transmit(tcp);
+        tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+        break;
+    default:
+        break;
+    }
+}
+
+static void tcp_ostate_sending_in(tcp_t* tcp, const tcp_out_event_t event)
+{
+    switch (event)
+    {
+    case TCP_OUT_EVENT_SEND:
+        if (tcp->send.un_ack_seq == tcp->send.next_seq || tcp->flags.fin_out)
+        {
+            if (tcp_buf_count(&tcp->send.buf) || tcp->flags.fin_out)
+            {
+                tcp_transmit(tcp);
+                tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+            }
+            else // 没有数据要发，进入空闲状态
+            {
+                tcp_set_ostate(tcp, TCP_OSTATE_IDLE);
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void tcp_ostate_retrans_in(tcp_t* tcp, const tcp_out_event_t event)
+{
+    switch (event)
+    {
+    case TCP_OUT_EVENT_SEND:
+        {
+            if (tcp->send.un_ack_seq == tcp->send.next_seq || tcp->flags.fin_out)
+            {
+                if (tcp_buf_count(&tcp->send.buf) || tcp->flags.fin_out)
+                {
+                    // 发送前需要检查窗口，如果为0则进入坚持状态，否则会进入普通发送状态
+                    tcp_transmit(tcp);
+                    tcp_set_ostate(tcp, TCP_OSTATE_SENDING);
+                }
+                else
+                {
+                    tcp_set_ostate(tcp, TCP_OSTATE_IDLE);
+                }
+            }
+            else
+            {
+                tcp_set_ostate(tcp, TCP_OSTATE_RETRANS);
+                tcp_retransmit(tcp);
+            }
+            break;
+        }
+    default:
+        break;
+    }
+}
+
+typedef void (*tcp_ostate_handler_t)(tcp_t* tcp, const tcp_out_event_t event);
+
+void tcp_out_event(tcp_t* tcp, const tcp_out_event_t event)
+{
+    static tcp_ostate_handler_t handlers[] = {
+        [TCP_OSTATE_IDLE] = tcp_ostate_idle_in,
+        [TCP_OSTATE_SENDING] = tcp_ostate_sending_in,
+        [TCP_OSTATE_RETRANS] = tcp_ostate_retrans_in,
+    };
+
+    if (tcp->send.ostate >= TCP_OSTATE_MAX)
+    {
+        dbug_error(DBG_MOD_TCP, "tcp_out_event: invalid ostate %s", tcp_ostate_name(tcp->send.ostate));
+        return;
+    }
+    handlers[tcp->send.ostate](tcp, event);
 }

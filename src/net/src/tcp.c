@@ -380,7 +380,8 @@ static net_err_t tcp_send(sock_t* sock, const uint8_t* buf, const size_t len, co
             return NET_ERR_NEED_WAIT;
         }
         *sent_size = (ssize_t)send_n;
-        tcp_transmit(tcp);
+        // tcp_transmit(tcp);
+        tcp_out_event(tcp, TCP_OUT_EVENT_SEND);
         return NET_ERR_OK;
     default:
         dbug_error(DBG_MOD_TCP, "tcp_send: invalid state %s", tcp_state_name(tcp->state));
@@ -551,6 +552,8 @@ static tcp_t* tcp_alloc(const bool wait, const int family, const int protocol)
     tcp->conn.keep_idle = TCP_KEEP_IDLE;
     tcp->conn.keep_interval = TCP_KEEP_INTERVAL;
     tcp->conn.keep_count = TCP_KEEP_COUNT;
+    tcp->send.ostate = TCP_OSTATE_IDLE;
+    tcp->send.retrans_max = TCP_INIT_RETRIES;
 
     static const sock_ops_t tcp_ops = {
         .send = tcp_send,
@@ -773,6 +776,7 @@ void tcp_keep_alive_reset(tcp_t* tcp)
 void tcp_kill_all_timer(const tcp_t* tcp)
 {
     net_timer_remove(&tcp->conn.keep_timer);
+    net_timer_remove(&tcp->send.retrans_timer);
 }
 
 bool tcp_backlog_full(const tcp_t* tcp)

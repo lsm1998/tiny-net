@@ -2,7 +2,6 @@
 #define TINY_NET_SELECT_SERVE_H
 
 #include "socket.h"
-#include "types.h"
 
 // 计算fd_set中每个uint32_t可以存储多少个文件描述符的位
 #define X_NFDBITS ((int)(sizeof(uint32_t) * 8))
@@ -66,6 +65,6 @@ net_err_t x_select_init(void);
 
 void x_select_wakeup(void);
 
-int x_select(int n_fds, x_fd_set* read_fds, x_fd_set* write_fds, x_fd_set* except_fds, const timeval* timeout);
+int x_select(int n_fds, x_fd_set* read_fds, x_fd_set* write_fds, x_fd_set* except_fds, const x_timeval* timeout);
 
 #endif //TINY_NET_SELECT_SERVE_H

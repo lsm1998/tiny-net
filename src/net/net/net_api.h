@@ -1,7 +1,6 @@
 #ifndef TINY_NET_NET_API_H
 #define TINY_NET_NET_API_H
 
-#include "types.h"
 #include "socket.h"
 #include "tool.h"
 
@@ -16,6 +15,11 @@
 
 #undef ntohl
 #define ntohl x_ntohl
+
+#define timeval x_timeval
+
+#undef INADDR_NONE
+#define INADDR_NONE             0xffffffff
 
 char* x_inet_ntoa(struct in_addr in);
 

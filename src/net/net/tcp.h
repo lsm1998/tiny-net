@@ -103,15 +103,22 @@ typedef enum tcp_state_t
     TCP_STATE_CLOSING,
     TCP_STATE_LAST_ACK,
     TCP_STATE_TIME_WAIT,
-
     TCP_STATE_MAX,
 } tcp_state_t;
+
+typedef enum tcp_ostate_t
+{
+    TCP_OSTATE_IDLE = 0, // 空闲状态
+    TCP_OSTATE_SENDING, // 正在发送数据
+    TCP_OSTATE_RETRANS, // 正在重传数据
+    TCP_OSTATE_MAX,
+} tcp_ostate_t;
 
 typedef struct tcp_t
 {
     sock_t base;
 
-    struct tcp_t *parent; // 父连接，监听套接字的tcp_t指针
+    struct tcp_t* parent; // 父连接，监听套接字的tcp_t指针
 
     tcp_state_t state; // TCP连接状态
 
@@ -146,6 +153,11 @@ typedef struct tcp_t
         uint32_t un_ack_seq; // 最后一个未确认的序列号
         uint32_t isn; // 初始序列号
         sock_wait_t wait;
+        net_timer_t retrans_timer; // 重传计时器
+        int retrans_max; // 最大重传次数
+        int retrans_count; // 当前重传次数
+        int rto; // 重传超时时间，单位毫秒
+        tcp_ostate_t ostate; // 发送状态
     } send;
 
     struct
