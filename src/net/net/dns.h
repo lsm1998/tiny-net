@@ -87,7 +87,7 @@ typedef struct dns_entry_t
 {
     int ttl; // 该表项的生存时间
     ipaddr_t ipaddr; // 对应的IP地址
-    char domain_name[DNS_DOMAIN_MAX_LEN]; //  域名最大长度
+    char domain[DNS_DOMAIN_MAX_LEN]; //  域名最大长度
 } dns_entry_t;
 
 void dns_init();

@@ -23,7 +23,7 @@ static dns_req_t dns_req_list[DNS_REQ_SIZE];
 static uint8_t working_buf[DNS_WORKING_BUF_SIZE];
 
 // 跳过域名字段，返回跳过后的地址；如果格式错误或者越界，返回NULL
-static const uint8_t* domain_name_skip(const uint8_t* name, const size_t size)
+static const uint8_t* domain_skip(const uint8_t* name, const size_t size)
 {
     const uint8_t* c = name;
     const uint8_t* end = name + size;
@@ -68,7 +68,7 @@ static dns_entry_t* dns_entry_find(const char* domain)
         {
             continue;
         }
-        if (plat_strcmp(entry->domain_name, domain) == 0)
+        if (plat_strcmp(entry->domain, domain) == 0)
         {
             return entry;
         }
@@ -113,12 +113,12 @@ static void dns_req_add(dns_req_t* req)
 }
 
 // 初始化DNS表项，设置域名、TTL和IP地址
-static void dns_entry_init(dns_entry_t* entry, const char* domain_name, const uint32_t ttl, const ipaddr_t* ipaddr)
+static void dns_entry_init(dns_entry_t* entry, const char* domain, const uint32_t ttl, const ipaddr_t* ipaddr)
 {
     entry->ttl = (int)ttl;
     ipaddr_copy(&entry->ipaddr, ipaddr);
-    plat_strncpy(entry->domain_name, domain_name, DNS_DOMAIN_MAX_LEN - 1);
-    entry->domain_name[DNS_DOMAIN_MAX_LEN - 1] = '\0';
+    plat_strncpy(entry->domain, domain, DNS_DOMAIN_MAX_LEN - 1);
+    entry->domain[DNS_DOMAIN_MAX_LEN - 1] = '\0';
 }
 
 // 插入DNS表项，如果没有空闲表项，则替换掉TTL最小的表项
@@ -353,7 +353,7 @@ void dns_in()
         const uint8_t* rcv_start = working_buf + sizeof(dns_header_t);
         for (int i = 0; i < header->qdcount; i++)
         {
-            rcv_start = domain_name_skip(rcv_start, rcv_end - rcv_start);
+            rcv_start = domain_skip(rcv_start, rcv_end - rcv_start);
             if (rcv_start == (const uint8_t*)0 || (size_t)(rcv_end - rcv_start) < sizeof(dns_qfield_t))
             {
                 dbug_warn(DBG_MOD_DNS, "question size error");
@@ -367,7 +367,7 @@ void dns_in()
         for (int i = 0; i < header->ancount && rcv_start < rcv_end; i++)
         {
             // 跳过域名，不做检查
-            rcv_start = domain_name_skip(rcv_start, rcv_end - rcv_start);
+            rcv_start = domain_skip(rcv_start, rcv_end - rcv_start);
             if (rcv_start == (const uint8_t*)0)
             {
                 dbug_warn(DBG_MOD_DNS, "size error");
