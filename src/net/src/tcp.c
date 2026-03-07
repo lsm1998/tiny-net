@@ -631,8 +631,8 @@ net_err_t tcp_abort(tcp_t* tcp, const net_err_t err)
 
 void tcp_read_options(tcp_t* tcp, tcp_header_t* header)
 {
-    uint8_t* options = (uint8_t*)(header) + sizeof(tcp_header_t);
-    uint8_t* options_end = (uint8_t*)(header) + tcp_header_size(header);
+    uint8_t* options = (uint8_t*)header + sizeof(tcp_header_t);
+    uint8_t* options_end = (uint8_t*)header + tcp_header_size(header);
 
     if (options >= options_end)
     {

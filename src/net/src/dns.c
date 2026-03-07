@@ -5,16 +5,25 @@
 #include "udp.h"
 #include "net_api.h"
 
-static dns_entry_t dns_entry_tbl[DNS_ENTRY_SIZE]; // DNS缓存表
+// DNS缓存表
+static dns_entry_t dns_entry_tbl[DNS_ENTRY_SIZE];
+// 定时器，定期更新DNS表项的TTL，删除过期的表项
 static net_timer_t entry_update_timer;
+// DNS查询使用的UDP套接字
 static udp_t* dns_udp;
+// DNS查询请求相关
 static uint16_t id;
-static nlist_t req_list; // 请求列表
-static mblock_t req_mblock; // 请求分配结构
+// DNS查询请求列表，使用链表实现
+static nlist_t req_list;
+// DNS查询请求分配使用的内存块
+static mblock_t req_mblock;
+// DNS查询请求内存块的实际存储空间
 static dns_req_t dns_req_list[DNS_REQ_SIZE];
+// DNS查询使用的工作缓冲区，构造DNS查询包时使用
 static uint8_t working_buf[DNS_WORKING_BUF_SIZE];
 
-static const uint8_t* domain_name_skip(const uint8_t* name, size_t size)
+// 跳过域名字段，返回跳过后的地址；如果格式错误或者越界，返回NULL
+static const uint8_t* domain_name_skip(const uint8_t* name, const size_t size)
 {
     const uint8_t* c = name;
     const uint8_t* end = name + size;
@@ -25,9 +34,9 @@ static const uint8_t* domain_name_skip(const uint8_t* name, size_t size)
         {
             // 一个域名仅能包含一个指针，要么只有两个字节就只包含一个指针，要么只在结尾部分跟随一个指针
             // 压缩标签无需以'\0'结束
-            if ((end - c) < 2)
+            if (end - c < 2)
             {
-                return (const uint8_t*)0;
+                return NULL;
             }
             c += 2;
             goto skip_end;
@@ -36,7 +45,7 @@ static const uint8_t* domain_name_skip(const uint8_t* name, size_t size)
         uint8_t label_size = *c++;
         if ((size_t)(end - c) < label_size)
         {
-            return (const uint8_t*)0;
+            return NULL;
         }
         c += label_size;
     }
@@ -47,14 +56,16 @@ static const uint8_t* domain_name_skip(const uint8_t* name, size_t size)
         c++;
     }
 skip_end:
-    return c <= end ? c : (const uint8_t*)0;
+    return c <= end ? c : NULL;
 }
 
+// 释放DNS表项，重置为初始状态
 static void dns_entry_free(dns_entry_t* entry)
 {
     ipaddr_set_any(&entry->ipaddr);
 }
 
+// 删除DNS查询请求，通知等待的线程，并根据错误类型决定是否需要重试
 static void dns_req_remove(dns_req_t* req, const net_err_t err)
 {
     // 没有服务器可以重试了，删除该请求
@@ -73,6 +84,7 @@ static void dns_req_remove(dns_req_t* req, const net_err_t err)
     }
 }
 
+// 添加DNS查询请求到列表中，初始化相关字段
 static void dns_req_add(dns_req_t* req)
 {
     req->query_id = ++id; // 纪录一下这个ID值以结构中
@@ -83,15 +95,17 @@ static void dns_req_add(dns_req_t* req)
     nlist_insert_last(&req_list, &req->node);
 }
 
-static void dns_entry_init(dns_entry_t* entry, const char* domain_name, const int ttl, const ipaddr_t* ipaddr)
+// 初始化DNS表项，设置域名、TTL和IP地址
+static void dns_entry_init(dns_entry_t* entry, const char* domain_name, const uint32_t ttl, const ipaddr_t* ipaddr)
 {
-    entry->ttl = ttl;
+    entry->ttl = (int)ttl;
     ipaddr_copy(&entry->ipaddr, ipaddr);
     plat_strncpy(entry->domain_name, domain_name, DNS_DOMAIN_MAX_LEN - 1);
     entry->domain_name[DNS_DOMAIN_MAX_LEN - 1] = '\0';
 }
 
-static void dns_entry_insert(const char* domain_name, int ttl, ipaddr_t* ipaddr)
+// 插入DNS表项，如果没有空闲表项，则替换掉TTL最小的表项
+static void dns_entry_insert(const char* domain_name, const uint32_t ttl, const ipaddr_t* ipaddr)
 {
     dns_entry_t* free = NULL;
     dns_entry_t* oldest = NULL;
@@ -107,7 +121,7 @@ static void dns_entry_insert(const char* domain_name, int ttl, ipaddr_t* ipaddr)
             break;
         }
 
-        if ((oldest == (dns_entry_t*)0) || (entry->ttl < oldest->ttl))
+        if (oldest == (dns_entry_t*)0 || entry->ttl < oldest->ttl)
         {
             oldest = entry;
         }
@@ -121,12 +135,14 @@ static void dns_entry_insert(const char* domain_name, int ttl, ipaddr_t* ipaddr)
     dns_entry_init(free, domain_name, ttl, ipaddr);
 }
 
+// 删除DNS查询请求，通知等待的线程，并根据错误类型决定是否需要重试
 static void dns_req_fail(dns_req_t* req, const net_err_t err)
 {
     // 需要停止，或者超过最大重试次数，中止
     dns_req_remove(req, err);
 }
 
+// 构造DNS查询包中的问题区段，返回问题区段后续部分的地址；如果构造失败，返回NULL
 static uint8_t* add_query_field(const char* domain_name, char* buf, const size_t size)
 {
     // 检查长度大小：包含字符串有效长，开头的.和结束的'\0'
