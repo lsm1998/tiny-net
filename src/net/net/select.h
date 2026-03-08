@@ -9,6 +9,24 @@
 // 计算fd_set中需要多少个uint32_t来存储NET_FD_MAX个文件描述符
 #define X_FDSET_WORDS ((NET_FD_MAX + X_NFDBITS - 1) / X_NFDBITS)
 
+#undef fd_set
+#define fd_set x_fd_set
+
+#undef FD_SETSIZE
+#define FD_SETSIZE NET_FD_MAX
+
+#undef FD_ZERO
+#define FD_ZERO(set) x_fd_zero_bits(set)
+
+#undef FD_SET
+#define FD_SET(fd, set) x_fd_set_bits(fd, set)
+
+#undef FD_CLR
+#define FD_CLR(fd, set) x_fd_clr_bits(fd, set)
+
+#undef FD_ISSET
+#define FD_ISSET(fd, set) x_fd_isset_bits(fd, set)
+
 typedef struct x_fd_set
 {
     uint32_t bits[X_FDSET_WORDS];

@@ -640,7 +640,7 @@ static void tcp_ostate_retrans_in(tcp_t* tcp, const tcp_out_event_t event)
     }
 }
 
-typedef void (*tcp_ostate_handler_t)(tcp_t* tcp, const tcp_out_event_t event);
+typedef void (*tcp_ostate_handler_t)(tcp_t* tcp, tcp_out_event_t event);
 
 void tcp_out_event(tcp_t* tcp, const tcp_out_event_t event)
 {
